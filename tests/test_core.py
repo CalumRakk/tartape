@@ -4,9 +4,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tar_engine import TarEntryFactory, TarTape
-from tar_engine.core import TarStreamGenerator
-from tar_engine.enums import TarEventType
+from tartape import TarEntryFactory, TarTape
+from tartape.core import TarStreamGenerator
+from tartape.enums import TarEventType
 
 
 class TestUstarPathSplitting(unittest.TestCase):
