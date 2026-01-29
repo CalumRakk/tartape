@@ -1,6 +1,6 @@
-from typing import Any, Optional
+from typing import Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel
 
 from .enums import TarEventType
 
@@ -12,14 +12,40 @@ class TarEntry(BaseModel):
     arc_path: str  # Ruta que tendrá dentro del TAR
     size: int
     mtime: float
+    is_dir: bool = False
 
 
-class TarEvent(BaseModel):
-    """Información que el motor devuelve al usuario."""
+class FileStartMetadata(BaseModel):
+    start_offset: int
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    type: TarEventType
+class FileEndMetadata(BaseModel):
+    end_offset: int
+    md5sum: Optional[str]
+
+
+class TarFileStartEvent(BaseModel):
+    type: Literal[TarEventType.FILE_START]
+    entry: TarEntry
+    metadata: FileStartMetadata
+
+
+class TarFileDataEvent(BaseModel):
+    type: Literal[TarEventType.FILE_DATA]
     entry: Optional[TarEntry] = None
-    data: Optional[bytes] = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    data: bytes
+
+
+class TarFileEndEvent(BaseModel):
+    type: Literal[TarEventType.FILE_END]
+    entry: TarEntry
+    metadata: FileEndMetadata
+
+
+class TarTapeCompletedEvent(BaseModel):
+    type: Literal[TarEventType.TAPE_COMPLETED]
+
+
+TarEvent = Union[
+    TarFileStartEvent, TarFileDataEvent, TarFileEndEvent, TarTapeCompletedEvent
+]

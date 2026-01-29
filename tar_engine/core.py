@@ -3,7 +3,16 @@ from typing import Generator
 
 from .constants import CHUNK_SIZE_DEFAULT, TAR_BLOCK_SIZE, TAR_FOOTER_SIZE
 from .enums import TarEventType
-from .schemas import TarEntry, TarEvent
+from .schemas import (
+    FileEndMetadata,
+    FileStartMetadata,
+    TarEntry,
+    TarEvent,
+    TarFileDataEvent,
+    TarFileEndEvent,
+    TarFileStartEvent,
+    TarTapeCompletedEvent,
+)
 
 
 class TarHeader:
@@ -80,7 +89,7 @@ class TarHeader:
 
         # - Convertimos a octal (base 8) y quitamos el prefijo "0o"
         # - Rellenamos con ceros a la izquierda hasta tener 6 caracteres
-        # - Construimos el campo final de 8 bytes: [oct][oct][oct][doct][oct][oct][\0][ ]
+        # - Construimos el campo final de 8 bytes: [oct][oct][oct][oct][oct][oct][\0][ ]
         octal_sum = oct(suma_total)[2:]
         octal_filled = octal_sum.zfill(6)
         final_string = octal_filled + "\0" + " "
@@ -100,65 +109,82 @@ class TarStreamGenerator:
 
     def stream(self) -> Generator[TarEvent, None, None]:
         for entry in self.entries:
-            # Inicio de archivo
-            yield TarEvent(
+            yield TarFileStartEvent(
                 type=TarEventType.FILE_START,
                 entry=entry,
-                metadata={"start_offset": self._emitted_bytes},
+                metadata=FileStartMetadata(start_offset=self._emitted_bytes),
             )
 
-            # Header
+            # HEADER: Siempre son 512 bytes
             header = self._build_header(entry)
-            self._emitted_bytes += len(header)
-            yield TarEvent(type=TarEventType.FILE_DATA, data=header, entry=entry)
+            header_bytes = header
+            yield TarFileDataEvent(
+                type=TarEventType.FILE_DATA, data=header_bytes, entry=entry
+            )
+            self._emitted_bytes += len(header_bytes)
 
-            # Data
             md5 = hashlib.md5()
-            with open(entry.source_path, "rb") as f:
-                while chunk := f.read(self.chunk_size):
-                    md5.update(chunk)
-                    self._emitted_bytes += len(chunk)
-                    yield TarEvent(type=TarEventType.FILE_DATA, data=chunk, entry=entry)
 
-            # Padding
-            padding_size = (
-                TAR_BLOCK_SIZE - (entry.size % TAR_BLOCK_SIZE)
-            ) % TAR_BLOCK_SIZE
-            if padding_size > 0:
-                padding = b"\0" * padding_size
-                self._emitted_bytes += padding_size
-                yield TarEvent(type=TarEventType.FILE_DATA, data=padding, entry=entry)
+            # DATA: Solo si es archivo
+            if not entry.is_dir:
+                with open(entry.source_path, "rb") as f:
+                    while chunk := f.read(self.chunk_size):
+                        md5.update(chunk)
+                        yield TarFileDataEvent(
+                            type=TarEventType.FILE_DATA, data=chunk, entry=entry
+                        )
+                        self._emitted_bytes += len(chunk)
 
-            # Fin de archivo
-            yield TarEvent(
+                # PADDING
+                padding_size = (
+                    TAR_BLOCK_SIZE - (entry.size % TAR_BLOCK_SIZE)
+                ) % TAR_BLOCK_SIZE
+
+                if padding_size > 0:
+                    padding = b"\0" * padding_size
+                    yield TarFileDataEvent(
+                        type=TarEventType.FILE_DATA, data=padding, entry=entry
+                    )
+                    self._emitted_bytes += padding_size
+
+            # Fin de ítem (Con MD5 si aplica)
+            yield TarFileEndEvent(
                 type=TarEventType.FILE_END,
                 entry=entry,
-                metadata={"md5sum": md5.hexdigest(), "end_offset": self._emitted_bytes},
+                metadata=FileEndMetadata(
+                    md5sum=md5.hexdigest() if not entry.is_dir else None,
+                    end_offset=self._emitted_bytes,
+                ),
             )
 
-        # Footer
+        # FOOTER 1024 bytes nulos al final de la cinta
         footer = b"\0" * TAR_FOOTER_SIZE
+        yield TarFileDataEvent(type=TarEventType.FILE_DATA, data=footer)
         self._emitted_bytes += len(footer)
-        yield TarEvent(type=TarEventType.FILE_DATA, data=footer)
-        yield TarEvent(type=TarEventType.TAPE_COMPLETED)
+
+        yield TarTapeCompletedEvent(type=TarEventType.TAPE_COMPLETED)
 
     def _build_header(self, item: TarEntry) -> bytes:
         """Construye un header para un archivo.
 
         - https://www.ibm.com/docs/en/zos/2.4.0?topic=formats-tar-format-tar-archives#taf__outar
         """
-        # 1. Preparación de rutas (Lógica de Prefijo/Nombre)
         name, prefix = self._split_path(item.arc_path)
+        if item.is_dir and not name.endswith("/"):
+            name += "/"
 
         h = TarHeader()
         h.set_string(0, 100, name)  # name
-        h.set_octal(100, 8, 0o644)  # mode # TODO: Agregar soporte para otros modos.
+        mode_value = 0o755 if item.is_dir else 0o644
+        h.set_octal(100, 8, mode_value)  # mode
         h.set_octal(108, 8, 0)  # uid
         h.set_octal(116, 8, 0)  # gid
 
         h.set_octal(124, 12, item.size)  # size
         h.set_octal(136, 12, int(item.mtime))  # mtime
-        h.set_bytes(156, b"0")  # typeflag (0 = normal file)
+
+        type_flag = b"5" if item.is_dir else b"0"
+        h.set_bytes(156, type_flag)
 
         # Indica que el archivo sigue un estandar moderno:
         h.set_bytes(257, b"ustar\0")  # magic (ustar + null)
