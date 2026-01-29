@@ -186,9 +186,11 @@ class TarStreamGenerator:
 
         - https://www.ibm.com/docs/en/zos/2.4.0?topic=formats-tar-format-tar-archives#taf__outar
         """
-        name, prefix = self._split_path(item.arc_path)
-        if item.is_dir and not name.endswith("/"):
-            name += "/"
+        full_arcpath = item.arc_path
+        if item.is_dir and not full_arcpath.endswith("/"):
+            full_arcpath += "/"
+
+        name, prefix = self._split_path(full_arcpath)
 
         h = TarHeader()
         h.set_string(0, 100, name)  # name: Nombre del archivo
