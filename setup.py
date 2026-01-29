@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setuptools.setup(
     name="tartape",
-    version="1.0.0",
+    version="1.5.0",
     author="Leo",
     author_email="leocasti2@gmail.com",
     description="An efficient, secure, and USTAR-compatible TAR streaming engine.",

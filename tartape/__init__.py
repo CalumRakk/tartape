@@ -1,7 +1,8 @@
+import logging
 import os
 import stat as stat_module
 from pathlib import Path
-from typing import Generator, List, Optional, Tuple
+from typing import Callable, Generator, List, Optional, Tuple, Union
 
 try:
     import grp
@@ -12,6 +13,11 @@ except ImportError:
 
 from .core import TarStreamGenerator
 from .schemas import TarEntry, TarEvent
+
+ExcludeType = Union[str, List[str], Callable[[Path], bool]]
+
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
 
 
 class TarEntryFactory:
@@ -108,7 +114,31 @@ class TarTape:
     def __init__(self):
         self._entries: List[TarEntry] = []
 
-    def add_folder(self, folder_path: str | Path, recursive: bool = True):
+    def _should_exclude(self, path: Path, exclude: Optional[ExcludeType]) -> bool:
+        """Determines if a path should be skipped based on the 'exclude' parameter."""
+        if exclude is None:
+            return False
+
+        # Function or Lambda
+        if callable(exclude):
+            return exclude(path)
+
+        # String único - glob patterns
+        if isinstance(exclude, str):
+            return path.match(exclude) or path.name == exclude
+
+        # List strings
+        if isinstance(exclude, list):
+            return any(path.match(p) or path.name == p for p in exclude)
+
+        return False
+
+    def add_folder(
+        self,
+        folder_path: str | Path,
+        recursive: bool = True,
+        exclude: Optional[ExcludeType] = None,
+    ):
         """Scans a folder and adds its contents to the archive."""
         root_path = Path(folder_path).absolute()
         if not root_path.is_dir():
@@ -116,29 +146,44 @@ class TarTape:
                 f"The path '{folder_path}' is not a directory or does not exist."
             )
 
-        # Add the root folder itself
-        self.add_file(root_path, arcname=root_path.name)
+        if not self._should_exclude(root_path, exclude):
+            self.add_file(root_path, arcname=root_path.name)
+            self._scan_and_add(root_path, root_path.name, recursive, exclude)
 
-        self._scan_and_add(root_path, root_path.name, recursive)
-
-    def _scan_and_add(self, current_path: Path, arc_prefix: str, recursive: bool):
+    def _scan_and_add(
+        self,
+        current_path: Path,
+        arc_prefix: str,
+        recursive: bool,
+        exclude: Optional[ExcludeType],
+    ):
         """Recursively scans a folder and adds its contents to the archive."""
         try:
             with os.scandir(current_path) as it:
                 for entry in it:
-                    entry_arcname = f"{arc_prefix}/{entry.name}"
                     entry_path = Path(entry.path)
+                    if self._should_exclude(entry_path, exclude):
+                        logger.debug(f"Excluding path: {entry_path}")
+                        continue
 
+                    entry_arcname = f"{arc_prefix}/{entry.name}"
                     self.add_file(entry_path, arcname=entry_arcname)
 
                     if recursive and entry.is_dir() and not entry.is_symlink():
-                        self._scan_and_add(entry_path, entry_arcname, recursive)
+                        self._scan_and_add(
+                            entry_path, entry_arcname, recursive, exclude
+                        )
 
         except PermissionError as e:
-            print(f"Skipping {current_path}: {e}")
+            logger.warning(f"Permission denied: {current_path}. Skipping directory.")
             return
 
-    def add_file(self, source_path: str | Path, arcname: str | None = None):
+    def add_file(
+        self,
+        source_path: str | Path,
+        arcname: str | None = None,
+        exclude: Optional[ExcludeType] = None,
+    ):
         """Adds a single file/entry to the tape.
 
         Args:
@@ -149,6 +194,10 @@ class TarTape:
             None
         """
         p = Path(source_path)
+        if self._should_exclude(p, exclude):
+            logger.debug(f"Excluding file: {p}")
+            return
+
         name = arcname or p.name
         # Ensure path uses Unix-style separators
         name_unix = name.replace("\\", "/")
@@ -156,7 +205,9 @@ class TarTape:
         entry = TarEntryFactory.create(p, name_unix)
         if entry:
             self._entries.append(entry)
-        # If entry is None, it was silently ignored (Socket/Pipe/etc)
+        else:
+            # If entry is None, it was silently ignored (Socket/Pipe/etc)
+            logger.info(f"Skipping unsupported file type: {p}")
 
     def stream(self, chunk_size: int = 64 * 1024) -> Generator[TarEvent, None, None]:
         """Starts the recording and emits the stream of events/bytes."""

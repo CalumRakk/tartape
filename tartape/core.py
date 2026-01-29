@@ -1,4 +1,5 @@
 import hashlib
+import logging
 from typing import Generator
 
 from .constants import CHUNK_SIZE_DEFAULT, TAR_BLOCK_SIZE, TAR_FOOTER_SIZE
@@ -13,6 +14,8 @@ from .schemas import (
     TarFileStartEvent,
     TarTapeCompletedEvent,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class TarHeader:
@@ -97,6 +100,8 @@ class TarStreamGenerator:
         self._emitted_bytes = 0
 
     def stream(self) -> Generator[TarEvent, None, None]:
+        logger.info(f"Starting TAR stream with {len(self.entries)} entries.")
+
         for entry in self.entries:
             yield TarFileStartEvent(
                 type=TarEventType.FILE_START,
@@ -127,11 +132,13 @@ class TarStreamGenerator:
 
                 # If the file changed size during streaming, abort to prevent corruption.
                 if bytes_written != entry.size:
-                    raise RuntimeError(
+                    error_msg = (
                         f"File integrity compromised: '{entry.source_path}'. "
                         f"Expected {entry.size} bytes, read {bytes_written} bytes. "
                         "Aborting to prevent archive corruption."
                     )
+                    logger.error(error_msg)
+                    raise RuntimeError(error_msg)
 
                 # PADDING: Align to 512-byte blocks
                 padding_size = (
@@ -164,6 +171,7 @@ class TarStreamGenerator:
         self._emitted_bytes += len(footer)
 
         yield TarTapeCompletedEvent(type=TarEventType.TAPE_COMPLETED)
+        logger.info("TAR stream completed successfully.")
 
     def _build_header(self, item: TarEntry) -> bytes:
         """Constructs a header for an entry based on USTAR format."""
