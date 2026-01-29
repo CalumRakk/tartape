@@ -21,7 +21,12 @@ class TarHeader:
 
     def set_string(self, offset: int, field_width: int, value: str):
         """Escribe una cadena codificada en UTF-8 y truncada."""
-        data = value.encode("utf-8")[:field_width]
+        data = value.encode("utf-8")
+        if len(data) > field_width:
+            raise ValueError(
+                f"Value '{value}' too long for field ({len(data)} > {field_width})"
+            )
+
         self.buffer[offset : offset + len(data)] = data
 
     def set_octal(self, offset: int, field_width: int, value: int):
@@ -222,20 +227,51 @@ class TarStreamGenerator:
 
     @staticmethod
     def _split_path(path: str) -> tuple[str, str]:
-        """Divide una ruta para cumplir con el límite de 100/155 bytes del prefix."""
-        if len(path) <= 100:
+        """
+        Divide una ruta para asegurar compatibilidad USTAR.
+        """
+        LIMIT_NAME_BYTES = 100
+        LIMIT_PREFIX_BYTES = 155
+        SEPARATOR = "/"
+
+        path_bytes = path.encode("utf-8")
+        if len(path_bytes) <= LIMIT_NAME_BYTES:
             return path, ""
 
-        # Buscamos el punto de corte ideal en una barra '/'
-        # El prefijo puede tener hasta 155 caracteres
-        split_at = path.rfind("/", 0, 156)
-        if split_at == -1:
-            raise ValueError(f"Path is too long ({len(path)}): {path}")
+        # Como la ruta es demasiado larga, debemos dividirla.
+        # Necesitamos encontrar un '/' tal que:
+        #   - La parte izquierda (prefix) <= 155 bytes
+        #   - La parte derecha (name) <= 100 bytes
 
-        prefix = path[:split_at]
-        name = path[split_at + 1 :]
+        best_split_index = -1
+        path_length = len(path)
 
-        if len(name) > 155:
-            raise ValueError(f"Name is too long ({len(name)}): {name}")
+        for i in range(path_length):
+            char = path[i]
 
-        return name, prefix
+            if char == SEPARATOR:
+                candidate_prefix = path[0:i]
+                candidate_name = path[i + 1 :]  # +1 para saltar el '/'
+
+                # Medimos sus tamaños en bytes
+                prefix_size = len(candidate_prefix.encode("utf-8"))
+                name_size = len(candidate_name.encode("utf-8"))
+
+                # Evaluamos si este corte es legal
+                is_prefix_valid = prefix_size <= LIMIT_PREFIX_BYTES
+                is_name_valid = name_size <= LIMIT_NAME_BYTES
+
+                if is_prefix_valid and is_name_valid:
+                    # Este corte es válido.
+                    # Seguimos iterando hacia la derecha, para encontrar el corte más profundo posible.
+                    best_split_index = i
+
+        if best_split_index == -1:
+            raise ValueError(
+                f"Path is too long or cannot be split to fit USTAR limits: '{path}' "
+                f"(Total bytes: {len(path_bytes)})"
+            )
+
+        final_prefix = path[0:best_split_index]
+        final_name = path[best_split_index + 1 :]
+        return final_name, final_prefix
