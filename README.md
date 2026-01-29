@@ -1,46 +1,49 @@
 # TarTape
 
-TarTape es un motor de generación de archivos TAR diseñado con un enfoque en **streaming** y en el control explícito del proceso de archivado.
+TarTape is a TAR archive generation engine designed with a focus on **streaming** and explicit control over the archiving process.
 
-Está pensado para entornos donde generar el archivo TAR completo en memoria o mediante archivos temporales en disco no es viable o deseable, como pipelines de datos, servicios web o sistemas con recursos limitados.
+It is built for environments where generating a full TAR file in memory or via temporary disk files is not feasible or desirable—such as data pipelines, web services, or resource-constrained systems.
 
-No intenta reemplazar todas las funcionalidades de las herramientas TAR tradicionales, sino ofrecer una alternativa clara y predecible para escenarios donde la observabilidad del flujo y la integridad de los datos son importantes.
+Rather than replacing traditional TAR tools, TarTape offers a predictable and observable alternative for scenarios where data flow integrity is paramount.
 
----
-
-## Características principales
-
-*   **Streaming real de datos**  
-    Genera un flujo continuo de bytes, facilitando su integración en pipelines donde el archivo final no necesita existir completo en disco o memoria (como subidas directas a la nube).
-
-*   **Eficiencia de memoria**  
-    El consumo de RAM es bajo y constante, independientemente del tamaño total del archivo. Esto permite procesar volúmenes masivos de datos de forma predecible.
-
-*   **Observabilidad**  
-    A diferencia de una "caja negra", TarTape emite eventos sobre el progreso. Puedes monitorear qué archivo se está procesando y reaccionar en tiempo real.
-
-*   **Integridad ante todo**  
-    El motor verifica que los archivos no cambien de tamaño mientras son leídos (ej. logs activos). Si detecta una discrepancia, detiene el proceso explícitamente para evitar generar archivos corruptos en silencio.
+[Leer versión en español (Spanish)](./README.es.md)
 
 ---
 
-## Instalación
+## Key Features
+
+*   **True Data Streaming**  
+    Generates a continuous byte stream, facilitating integration into pipelines where the final file doesn't need to reside on disk (e.g., direct cloud uploads).
+
+*   **Memory Efficiency**  
+    RAM consumption remains low and constant, regardless of the total archive size. This allows for processing massive data volumes predictably.
+
+*   **Observability**  
+    Unlike a "black box," TarTape emits events throughout the process. You can monitor exactly which file is being processed and react in real-time.
+
+*   **Integrity First**  
+    The engine verifies that files do not change size while being read (e.g., active logs). If a discrepancy is detected, it raises an explicit error to prevent silent archive corruption.
+
+
+---
+
+## Installation
 
 ```bash
 pip install git+https://github.com/CalumRakk/tartape.git
 ```
 
-## Ejemplos de uso
+## Usage Examples
 
-### Uso Básico : genera un archivo TAR
+### Basic Usage: Generate a TAR file
 
-En el caso más simple, TarTape emite los bytes del archivo TAR como un stream que puede escribirse directamente a un archivo.
+In the simplest case, TarTape emits the TAR file bytes as a stream that can be written directly to a file.
 
 ```python
 from tartape import TarTape, TarEventType
 
 tape = TarTape()
-tape.add_folder("./mis_datos")
+tape.add_folder("./my_data")
 
 with open("backup.tar", "wb") as f:
     for event in tape.stream():
@@ -49,9 +52,9 @@ with open("backup.tar", "wb") as f:
 ```
 
 
-### Streaming con monitoreo y control
+### Streaming with Monitoring and Control
 
-TarTape expone el proceso de archivado mediante eventos que permiten observar qué ocurre en cada etapa del stream.
+TarTape exposes the archiving process through events, allowing you to observe what happens at each stage of the stream.
 
 ```python
 from tartape import TarTape, TarEventType
@@ -61,20 +64,19 @@ tape.add_folder("/var/log/app")
 
 for event in tape.stream():
     if event.type == TarEventType.FILE_START:
-        # Se emite antes de procesar un archivo
-        print(f"Archivando: {event.entry.arc_path} ({event.entry.size} bytes)")
+        # Emitted before processing a file
+        print(f"Archiving: {event.entry.arc_path} ({event.entry.size} bytes)")
 
     elif event.type == TarEventType.FILE_DATA:
-        # Bytes crudos del TAR (headers, contenido y padding)
-        # Aquí podrían enviarse directamente a red o a un bucket
+        # Raw TAR bytes (headers, content, and padding)
+        # These can be sent directly to a network socket or a bucket
         pass
 
     elif event.type == TarEventType.FILE_END:
-        # Se emite al finalizar un archivo
-        # Incluye metadatos como el hash calculado durante la lectura
-        print(f"Archivo completado. MD5: {event.metadata.md5sum}")
+        # Emitted when a file is finished
+        # Includes metadata like the MD5 hash calculated during the read
+        print(f"File completed. MD5: {event.metadata.md5sum}")
 
     elif event.type == TarEventType.TAPE_COMPLETED:
-        print("Archivo TAR finalizado correctamente.")
-
+        print("TAR archive completed successfully.")
 ```

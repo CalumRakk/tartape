@@ -8,7 +8,7 @@ setuptools.setup(
     version="1.0.0",
     author="Leo",
     author_email="leocasti2@gmail.com",
-    description="Un motor de streaming TAR eficiente, seguro y compatible con USTAR.",
+    description="An efficient, secure, and USTAR-compatible TAR streaming engine.",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/CalumRakk/tartape",

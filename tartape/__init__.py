@@ -16,21 +16,21 @@ from .schemas import TarEntry, TarEvent
 
 class TarEntryFactory:
     """
-    Responsable exclusivamente de inspeccionar el sistema de archivos
-    y fabricar objetos TarEntry válidos.
+    Exclusively responsible for inspecting the file system
+    and instantiating valid TarEntry objects.
 
-    Centraliza:
-    1. El uso de lstat (evitar seguir symlinks).
-    2. El filtrado de tipos (Solo File, Dir, Link).
-    3. La extracción de metadatos (Usuarios, Grupos, Modos).
+    Centralizes:
+    1. Usage of lstat (to avoid following symlinks).
+    2. Type filtering (Only File, Dir, Link are supported).
+    3. Metadata extraction (Users, Groups, Permissions).
     """
 
     @classmethod
     def create(cls, source_path: Path, arcname: str) -> Optional[TarEntry]:
         """
-        Analiza una ruta y crea un TarEntry.
-        Retorna None si el archivo es de un tipo no soportado (Socket, Pipe, etc).
-        Lanza OSError/FileNotFoundError si hay problemas de acceso.
+        Analyzes a path and creates a TarEntry.
+        Returns None if the file is an unsupported type (Socket, Pipe, etc).
+        Raises OSError/FileNotFoundError if there are access issues.
         """
         st = source_path.lstat()
         mode = st.st_mode
@@ -47,9 +47,9 @@ class TarEntryFactory:
 
         if is_symlink:
             linkname = os.readlink(source_path)
-            size = 0  # En TAR, size de los symlinks es 0
+            size = 0  # In TAR, symlinks have a size of 0
         elif is_dir:
-            size = 0  # Los directorios pesan 0 en el header TAR
+            size = 0  # Directories have a size of 0 in the TAR header
 
         return TarEntry(
             source_path=str(source_path.absolute()),
@@ -68,7 +68,7 @@ class TarEntryFactory:
 
     @staticmethod
     def _diagnose_type(mode: int) -> Tuple[bool, bool, bool]:
-        """Retorna (is_dir, is_reg, is_symlink) basado en el modo."""
+        """Returns (is_dir, is_reg, is_symlink) based on the mode."""
         return (
             stat_module.S_ISDIR(mode),
             stat_module.S_ISREG(mode),
@@ -77,9 +77,9 @@ class TarEntryFactory:
 
     @staticmethod
     def _extract_metadata(st: os.stat_result) -> Tuple[int, int, int, str, str]:
-        """Obtiene mode, uid, gid, uname, gname de forma segura."""
-        # S_IMODE limpia los bits de tipo (ej: quita el bit que dice "soy directorio")
-        # quedándose solo con los permisos (0o755).
+        """Safely extracts mode, uid, gid, uname, and gname."""
+        # S_IMODE clears type bits (e.g., removes the "I am a directory" bit)
+        # keeping only the permissions (e.g., 0o755).
         mode = stat_module.S_IMODE(st.st_mode)
 
         uid = st.st_uid
@@ -103,16 +103,16 @@ class TarEntryFactory:
 
 
 class TarTape:
-    """Interfaz amigable para grabar una cinta TAR."""
+    """User-friendly interface for recording a TAR tape."""
 
     def __init__(self):
         self._entries: List[TarEntry] = []
 
     def add_folder(self, folder_path: str | Path, recursive: bool = True):
-        """Escanea una carpeta y agrega sus contenidos."""
+        """Scans a folder and adds its contents to the archive."""
         root = Path(folder_path)
 
-        # carpeta raíz
+        # Add the root folder itself
         self.add_file(root, arcname=root.name)
 
         pattern = "**/*" if recursive else "*"
@@ -121,57 +121,30 @@ class TarTape:
                 rel_path = p.relative_to(root.parent)
                 self.add_file(p, arcname=rel_path.as_posix())
             except (ValueError, OSError):
-                # si glob lista algo al que no se puede acceder. No hay fallo total, simplemente lo saltamos.
+                # If glob lists something inaccessible, skip it rather than failing the whole process.
                 continue
 
-    def _get_os_metadata(self, st: os.stat_result) -> tuple[int, int, int, str, str]:
-        """
-        Extrae metadatos de un objeto stat_result.
-        Retorna: (mode, uid, gid, uname, gname)
-        """
-
-        mode = stat_module.S_IMODE(st.st_mode)
-
-        uid = st.st_uid
-        gid = st.st_gid
-
-        uname = ""
-        gname = ""
-
-        if pwd:
-            try:
-                uname = pwd.getpwuid(uid).pw_name  # type: ignore
-            except (KeyError, AttributeError):
-                uname = str(uid)
-
-        if grp:
-            try:
-                gname = grp.getgrgid(gid).gr_name  # type: ignore
-            except (KeyError, AttributeError):
-                gname = str(gid)
-
-        return mode, uid, gid, uname, gname
-
     def add_file(self, source_path: str | Path, arcname: str | None = None):
-        """Agrega un archivo a la cinta.
+        """Adds a single file/entry to the tape.
 
         Args:
-            source_path: Ruta al archivo.
-            arcname: Nombre del archivo en la cinta.
+            source_path: Physical path to the file.
+            arcname: Target path inside the TAR archive.
 
         Returns:
             None
         """
         p = Path(source_path)
         name = arcname or p.name
+        # Ensure path uses Unix-style separators
         name_unix = name.replace("\\", "/")
 
         entry = TarEntryFactory.create(p, name_unix)
         if entry:
             self._entries.append(entry)
-        # Si entry es None, se ignoró silenciosamente (Socket/Pipe/etc)
+        # If entry is None, it was silently ignored (Socket/Pipe/etc)
 
     def stream(self, chunk_size: int = 64 * 1024) -> Generator[TarEvent, None, None]:
-        """Inicia la grabación y emite el flujo de eventos/bytes."""
+        """Starts the recording and emits the stream of events/bytes."""
         engine = TarStreamGenerator(self._entries, chunk_size=chunk_size)
         yield from engine.stream()

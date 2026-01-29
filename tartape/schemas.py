@@ -6,10 +6,10 @@ from .enums import TarEventType
 
 
 class TarEntry(BaseModel):
-    """Representa un ítem que entrará en la cinta."""
+    """Represents an item to be recorded on the tape."""
 
-    source_path: str  # Ruta física en disco
-    arc_path: str  # Ruta que tendrá dentro del TAR
+    source_path: str  # Physical path on disk
+    arc_path: str  # Path inside the TAR
     size: int
     mtime: float
     is_dir: bool = False
