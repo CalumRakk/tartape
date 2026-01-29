@@ -174,23 +174,27 @@ class TarStreamGenerator:
             name += "/"
 
         h = TarHeader()
-        h.set_string(0, 100, name)  # name
-        mode_value = 0o755 if item.is_dir else 0o644
-        h.set_octal(100, 8, mode_value)  # mode
-        h.set_octal(108, 8, 0)  # uid
-        h.set_octal(116, 8, 0)  # gid
+        h.set_string(0, 100, name)  # name: Nombre del archivo
+        h.set_octal(100, 8, item.mode)  # mode: Permisos (ej: 0644)
+        h.set_octal(108, 8, item.uid)  # uid: ID del propietario
+        h.set_octal(116, 8, item.gid)  # gid: ID del grupo
+        h.set_octal(124, 12, item.size)  # size: Tamaño en bytes
+        h.set_octal(136, 12, int(item.mtime))  # mtime: Fecha de modificación
 
-        h.set_octal(124, 12, item.size)  # size
-        h.set_octal(136, 12, int(item.mtime))  # mtime
-
+        # '0' = Archivo normal, '5' = Directorio
         type_flag = b"5" if item.is_dir else b"0"
         h.set_bytes(156, type_flag)
 
-        # Indica que el archivo sigue un estandar moderno:
-        h.set_bytes(257, b"ustar\0")  # magic (ustar + null)
-        h.set_bytes(263, b"00")  # version
+        # Firma USTAR (Identifica que usamos la extensión moderna)
+        h.set_bytes(257, b"ustar\0")  # magic: 6 bytes + null
+        h.set_bytes(263, b"00")  # version: 2 bytes ("00")
 
-        h.set_string(345, 155, prefix)  # prefix
+        # Metadatos de texto
+        h.set_string(265, 32, item.uname)  # uname: Nombre de usuario
+        h.set_string(297, 32, item.gname)  # gname: Nombre de grupo
+
+        # Permite que la ruta completa llegue a 255 caracteres (155 prefix + 100 name)
+        h.set_string(345, 155, prefix)
         return h.build()
 
     @staticmethod

@@ -13,6 +13,11 @@ class TarEntry(BaseModel):
     size: int
     mtime: float
     is_dir: bool = False
+    uid: int
+    gid: int
+    mode: int
+    uname: str
+    gname: str
 
 
 class FileStartMetadata(BaseModel):
