@@ -110,19 +110,33 @@ class TarTape:
 
     def add_folder(self, folder_path: str | Path, recursive: bool = True):
         """Scans a folder and adds its contents to the archive."""
-        root = Path(folder_path)
+        root_path = Path(folder_path).absolute()
+        if not root_path.is_dir():
+            raise ValueError(
+                f"The path '{folder_path}' is not a directory or does not exist."
+            )
 
         # Add the root folder itself
-        self.add_file(root, arcname=root.name)
+        self.add_file(root_path, arcname=root_path.name)
 
-        pattern = "**/*" if recursive else "*"
-        for p in root.glob(pattern):
-            try:
-                rel_path = p.relative_to(root.parent)
-                self.add_file(p, arcname=rel_path.as_posix())
-            except (ValueError, OSError):
-                # If glob lists something inaccessible, skip it rather than failing the whole process.
-                continue
+        self._scan_and_add(root_path, root_path.name, recursive)
+
+    def _scan_and_add(self, current_path: Path, arc_prefix: str, recursive: bool):
+        """Recursively scans a folder and adds its contents to the archive."""
+        try:
+            with os.scandir(current_path) as it:
+                for entry in it:
+                    entry_arcname = f"{arc_prefix}/{entry.name}"
+                    entry_path = Path(entry.path)
+
+                    self.add_file(entry_path, arcname=entry_arcname)
+
+                    if recursive and entry.is_dir() and not entry.is_symlink():
+                        self._scan_and_add(entry_path, entry_arcname, recursive)
+
+        except PermissionError as e:
+            print(f"Skipping {current_path}: {e}")
+            return
 
     def add_file(self, source_path: str | Path, arcname: str | None = None):
         """Adds a single file/entry to the tape.
