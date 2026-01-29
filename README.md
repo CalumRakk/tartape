@@ -30,7 +30,7 @@ Rather than replacing traditional TAR tools, TarTape offers a predictable and ob
 ## Installation
 
 ```bash
-pip install git+https://github.com/CalumRakk/tartape.git
+pip install tartape
 ```
 
 ## Usage Examples
