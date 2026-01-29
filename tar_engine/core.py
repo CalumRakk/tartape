@@ -117,16 +117,16 @@ class TarStreamGenerator:
 
             # HEADER: Siempre son 512 bytes
             header = self._build_header(entry)
-            header_bytes = header
             yield TarFileDataEvent(
-                type=TarEventType.FILE_DATA, data=header_bytes, entry=entry
+                type=TarEventType.FILE_DATA, data=header, entry=entry
             )
-            self._emitted_bytes += len(header_bytes)
+            self._emitted_bytes += len(header)
 
             md5 = hashlib.md5()
+            bytes_written = 0
 
-            # DATA: Solo si es archivo
-            if not entry.is_dir:
+            # DATA (Solo archivos normales, ni dirs ni symlinks tienen body)
+            if not entry.is_dir and not entry.is_symlink:
                 with open(entry.source_path, "rb") as f:
                     while chunk := f.read(self.chunk_size):
                         md5.update(chunk)
@@ -134,6 +134,15 @@ class TarStreamGenerator:
                             type=TarEventType.FILE_DATA, data=chunk, entry=entry
                         )
                         self._emitted_bytes += len(chunk)
+                        bytes_written += len(chunk)
+
+                # Si el archivo cambió de tamaño mientras leíamos, abortamos.
+                if bytes_written != entry.size:
+                    raise RuntimeError(
+                        f"File integrity compromised: '{entry.source_path}'. "
+                        f"Expected {entry.size} bytes, read {bytes_written} bytes. "
+                        "Aborting to prevent archive corruption."
+                    )
 
                 # PADDING
                 padding_size = (
@@ -148,11 +157,14 @@ class TarStreamGenerator:
                     self._emitted_bytes += padding_size
 
             # Fin de ítem (Con MD5 si aplica)
+            md5sum = (
+                md5.hexdigest() if (not entry.is_dir and not entry.is_symlink) else None
+            )
             yield TarFileEndEvent(
                 type=TarEventType.FILE_END,
                 entry=entry,
                 metadata=FileEndMetadata(
-                    md5sum=md5.hexdigest() if not entry.is_dir else None,
+                    md5sum=md5sum,
                     end_offset=self._emitted_bytes,
                 ),
             )
@@ -181,17 +193,28 @@ class TarStreamGenerator:
         h.set_octal(124, 12, item.size)  # size: Tamaño en bytes
         h.set_octal(136, 12, int(item.mtime))  # mtime: Fecha de modificación
 
-        # '0' = Archivo normal, '5' = Directorio
-        type_flag = b"5" if item.is_dir else b"0"
+        # TYPE FLAG
+        # '0' = File, '5' = Dir, '2' = Symlink
+        if item.is_symlink:
+            type_flag = b"2"
+        elif item.is_dir:
+            type_flag = b"5"
+        else:
+            type_flag = b"0"
+
         h.set_bytes(156, type_flag)
 
-        # Firma USTAR (Identifica que usamos la extensión moderna)
-        h.set_bytes(257, b"ustar\0")  # magic: 6 bytes + null
-        h.set_bytes(263, b"00")  # version: 2 bytes ("00")
+        # Si es symlink, aquí va el destino
+        if item.is_symlink:
+            h.set_string(157, 100, item.linkname)
 
-        # Metadatos de texto
-        h.set_string(265, 32, item.uname)  # uname: Nombre de usuario
-        h.set_string(297, 32, item.gname)  # gname: Nombre de grupo
+        # Firma USTAR (Identifica que usamos la extensión moderna)
+        h.set_bytes(257, b"ustar\0")
+        h.set_bytes(263, b"00")
+
+        # User/Group Names
+        h.set_string(265, 32, item.uname)
+        h.set_string(297, 32, item.gname)
 
         # Permite que la ruta completa llegue a 255 caracteres (155 prefix + 100 name)
         h.set_string(345, 155, prefix)

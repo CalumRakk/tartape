@@ -18,6 +18,8 @@ class TarEntry(BaseModel):
     mode: int
     uname: str
     gname: str
+    is_symlink: bool = False
+    linkname: str = ""
 
 
 class FileStartMetadata(BaseModel):
