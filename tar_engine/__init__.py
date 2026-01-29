@@ -113,13 +113,13 @@ class TarTape:
         root = Path(folder_path)
 
         # carpeta raíz
-        self.add_file(root, arcname=root.name, is_dir=True)
+        self.add_file(root, arcname=root.name)
 
         pattern = "**/*" if recursive else "*"
         for p in root.glob(pattern):
             try:
                 rel_path = p.relative_to(root.parent)
-                self.add_file(p, arcname=str(rel_path))
+                self.add_file(p, arcname=rel_path.as_posix())
             except (ValueError, OSError):
                 # si glob lista algo al que no se puede acceder. No hay fallo total, simplemente lo saltamos.
                 continue
@@ -152,12 +152,21 @@ class TarTape:
 
         return mode, uid, gid, uname, gname
 
-    def add_file(
-        self, source_path: str | Path, arcname: str | None = None, is_dir: bool = False
-    ):
+    def add_file(self, source_path: str | Path, arcname: str | None = None):
+        """Agrega un archivo a la cinta.
+
+        Args:
+            source_path: Ruta al archivo.
+            arcname: Nombre del archivo en la cinta.
+
+        Returns:
+            None
+        """
         p = Path(source_path)
         name = arcname or p.name
-        entry = TarEntryFactory.create(p, name)
+        name_unix = name.replace("\\", "/")
+
+        entry = TarEntryFactory.create(p, name_unix)
         if entry:
             self._entries.append(entry)
         # Si entry es None, se ignoró silenciosamente (Socket/Pipe/etc)
