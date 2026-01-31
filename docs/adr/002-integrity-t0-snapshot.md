@@ -25,3 +25,23 @@ Unlike a traditional backup where one might try to "reflect the present," `tarta
 *   **Negative:**
     *   **Sensitivity to Active Files:** The archiving process will fail if an attempt is made to process files that are being actively modified by the operating system.
     *   **Need for External Management:** Forces the developer to decide how to handle these failures (e.g., retrying the entire operation or excluding the conflicting file in a second pass).
+
+
+## Rejected Alternatives
+
+### Structural Integrity Only (Ignoring `mtime` changes)
+
+During the design phase, we considered allowing the engine to process files even if their modification time (`mtime`) had changed since the T0 snapshot, provided their size (`size`) remained identical.
+
+**Context:**
+Technically, if the file size does not change, the TAR block alignment remains intact, and the archive is structurally valid and extractable. This would seemingly increase the resilience of the stream against minor filesystem activity.
+
+**Reason for Rejection:**
+We explicitly rejected this "relaxed" approach due to its negative semantic implications:
+
+1.  **The "Forensic Lie":** The TAR Header is written *before* the file content is read. If we accept a file with a changed timestamp, the resulting archive will contain a Header with the old timestamp (T0) but content from a later time (T1). This creates an impossible-to-debug artifact where the metadata contradicts the actual data history.
+2.  **Downstream Cache Corruption:** Many synchronization tools (like `rsync`) and deployment caches rely on the `(size, mtime)` tuple to detect changes. By generating an archive with "old time" but "new content," we risk tricking downstream systems into skipping necessary updates.
+3.  **False Sense of Security:** A file can change its content without changing its size (e.g., toggling a boolean flag or a single pixel). Ignoring the `mtime` change violates the atomicity of the snapshot.
+
+**Conclusion:**
+Semantic integrity (truthfulness of metadata) is as critical as structural integrity. The engine must enforce a strict "Fail Fast" policy on *any* metadata discrepancy found between T0 and T1.

@@ -1,5 +1,6 @@
 import hashlib
 import logging
+import os
 from typing import Generator, Iterable
 
 from .constants import CHUNK_SIZE_DEFAULT, TAR_BLOCK_SIZE, TAR_FOOTER_SIZE
@@ -119,28 +120,69 @@ class TarStreamGenerator:
             self._emitted_bytes += len(header)
 
             md5 = hashlib.md5()
-            bytes_written = 0
 
             # DATA (Only regular files; directories and symlinks have no body)
             if not entry.is_dir and not entry.is_symlink:
+
+                # ADR-002: Integrity Validation (T0 vs T1)
+                try:
+                    current_stat = os.stat(entry.source_path)
+                except OSError as e:
+                    raise RuntimeError(f"File inaccessible: {entry.source_path}") from e
+
+                # Mtime Consistency
+                # Using a tiny epsilon for float comparison safety
+                if abs(current_stat.st_mtime - entry.mtime) > 1e-6:
+                    msg = (
+                        f"File modified (mtime) between inventory and stream: "
+                        f"'{entry.source_path}'. Aborting to maintain semantic integrity."
+                    )
+                    logger.error(msg)
+                    raise RuntimeError(msg)
+
+                # Size Consistency
+                if current_stat.st_size != entry.size:
+                    msg = (
+                        f"File size changed before reading: '{entry.source_path}'. "
+                        f"Expected {entry.size}, found {current_stat.st_size}."
+                    )
+                    logger.error(msg)
+                    raise RuntimeError(msg)
+
+                # Reading Process
+                bytes_to_read = entry.size
+
                 with open(entry.source_path, "rb") as f:
-                    while chunk := f.read(self.chunk_size):
+                    while bytes_to_read > 0:
+                        # Read only up to what we promised in the header
+                        read_size = min(self.chunk_size, bytes_to_read)
+                        chunk = f.read(read_size)
+
+                        if not chunk:
+                            # File shrunk during reading, EOF before expected
+                            msg = (
+                                f"File shrunk during read: '{entry.source_path}'. "
+                                f"Missing {bytes_to_read} bytes."
+                            )
+                            logger.error(msg)
+                            raise RuntimeError(msg)
+
                         md5.update(chunk)
                         yield TarFileDataEvent(
                             type=TarEventType.FILE_DATA, data=chunk, entry=entry
                         )
                         self._emitted_bytes += len(chunk)
-                        bytes_written += len(chunk)
+                        bytes_to_read -= len(chunk)
 
-                # If the file changed size during streaming, abort to prevent corruption.
-                if bytes_written != entry.size:
-                    error_msg = (
-                        f"File integrity compromised: '{entry.source_path}'. "
-                        f"Expected {entry.size} bytes, read {bytes_written} bytes. "
-                        "Aborting to prevent archive corruption."
-                    )
-                    logger.error(error_msg)
-                    raise RuntimeError(error_msg)
+                    # Did file grow during reading?
+                    # Try to read 1 extra byte. If successful, the file is bigger than promised.
+                    if f.read(1):
+                        msg = (
+                            f"File grew during read: '{entry.source_path}'. "
+                            f"Content exceeds promised size of {entry.size} bytes."
+                        )
+                        logger.error(msg)
+                        raise RuntimeError(msg)
 
                 # PADDING: Align to 512-byte blocks
                 padding_size = (
@@ -154,7 +196,7 @@ class TarStreamGenerator:
                     )
                     self._emitted_bytes += padding_size
 
-            # Item conclusion (includes MD5 if applicable)
+            # FILE COMPLETED
             md5sum = (
                 md5.hexdigest() if (not entry.is_dir and not entry.is_symlink) else None
             )
