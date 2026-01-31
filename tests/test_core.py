@@ -85,7 +85,7 @@ class TestTarIntegrity(unittest.TestCase):
             for _ in generator.stream():
                 pass
 
-        self.assertIn("File integrity compromised", str(cm.exception))
+        self.assertIn("File modified (mtime)", str(cm.exception))
 
 
 class TestTarOutputCompatibility(unittest.TestCase):
