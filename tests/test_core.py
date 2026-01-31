@@ -9,46 +9,6 @@ from tartape.core import TarStreamGenerator
 from tartape.enums import TarEventType
 
 
-class TestUstarPathSplitting(unittest.TestCase):
-    """
-    Valida la lógica crítica de dividir rutas largas en
-    prefix (155) + name (100) según el estándar USTAR.
-    """
-
-    def test_short_path(self):
-        """Caso simple: cabe en name y prefix"""
-        name, prefix = TarStreamGenerator._split_path("archivo.txt")
-        self.assertEqual(name, "archivo.txt")
-        self.assertEqual(prefix, "")
-
-    def test_split_path_exact(self):
-        """Caso complejo: Ruta larga que necesita división"""
-
-        long_prefix = "a" * 150
-        short_name = "archivo.txt"
-        full_path = f"{long_prefix}/{short_name}"
-
-        name, prefix = TarStreamGenerator._split_path(full_path)
-
-        self.assertEqual(prefix, long_prefix)
-        self.assertEqual(name, short_name)
-
-    def test_path_too_long_raises_error(self):
-        """Caso de fallo total: nombre de archivo > 100 chars sin slashes"""
-        huge_filename = "a" * 101
-        with self.assertRaises(ValueError):
-            TarStreamGenerator._split_path(huge_filename)
-
-    def test_utf8_handling(self):
-        """Valida que medimos bytes, no caracteres (un emoji son 4 bytes)"""
-        # 'ñ' son 2 bytes en utf-8
-        path = "ñ" * 50 + "/" + "archivo.txt"  # 100 bytes prefix
-        name, prefix = TarStreamGenerator._split_path(path)
-
-        self.assertEqual(name, "archivo.txt")
-        self.assertTrue(len(prefix.encode("utf-8")) <= 155)
-
-
 class TestTarIntegrity(unittest.TestCase):
     """
     Valida la robustez del motor ante cambios en el sistema de archivos

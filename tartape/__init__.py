@@ -66,7 +66,7 @@ class TarEntryFactory:
         elif is_dir:
             size = 0  # Directories have a size of 0 in the TAR header
 
-        return TarEntry(
+        entry = TarEntry(
             source_path=str(source_path.absolute()),
             arc_path=arcname,
             size=size,
@@ -80,6 +80,8 @@ class TarEntryFactory:
             uname=uname,
             gname=gname,
         )
+        entry.validate_compliance()
+        return entry
 
     @staticmethod
     def _diagnose_type(mode: int) -> Tuple[bool, bool, bool]:
