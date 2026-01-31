@@ -1,6 +1,6 @@
 import hashlib
 import logging
-from typing import Generator
+from typing import Generator, Iterable
 
 from .constants import CHUNK_SIZE_DEFAULT, TAR_BLOCK_SIZE, TAR_FOOTER_SIZE
 from .enums import TarEventType
@@ -94,13 +94,15 @@ class TarHeader:
 
 
 class TarStreamGenerator:
-    def __init__(self, entries: list[TarEntry], chunk_size: int = CHUNK_SIZE_DEFAULT):
+    def __init__(
+        self, entries: Iterable[TarEntry], chunk_size: int = CHUNK_SIZE_DEFAULT
+    ):
         self.entries = entries
         self.chunk_size = chunk_size
         self._emitted_bytes = 0
 
     def stream(self) -> Generator[TarEvent, None, None]:
-        logger.info(f"Starting TAR stream with {len(self.entries)} entries.")
+        logger.info("Starting TAR stream.")
 
         for entry in self.entries:
             yield TarFileStartEvent(

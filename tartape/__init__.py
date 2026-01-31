@@ -4,6 +4,8 @@ import stat as stat_module
 from pathlib import Path
 from typing import Callable, Generator, List, Optional, Tuple, Union
 
+from tartape.inventory import SqlInventory
+
 try:
     import grp
     import pwd
@@ -111,8 +113,8 @@ class TarEntryFactory:
 class TarTape:
     """User-friendly interface for recording a TAR tape."""
 
-    def __init__(self):
-        self._entries: List[TarEntry] = []
+    def __init__(self, index_path: str = ":memory:"):
+        self._inventory = SqlInventory(index_path)
 
     def _should_exclude(self, path: Path, exclude: Optional[ExcludeType]) -> bool:
         """Determines if a path should be skipped based on the 'exclude' parameter."""
@@ -145,10 +147,11 @@ class TarTape:
             raise ValueError(
                 f"The path '{folder_path}' is not a directory or does not exist."
             )
-
         if not self._should_exclude(root_path, exclude):
             self.add_file(root_path, arcname=root_path.name)
             self._scan_and_add(root_path, root_path.name, recursive, exclude)
+
+        self._inventory.commit()
 
     def _scan_and_add(
         self,
@@ -157,13 +160,11 @@ class TarTape:
         recursive: bool,
         exclude: Optional[ExcludeType],
     ):
-        """Recursively scans a folder and adds its contents to the archive."""
         try:
             with os.scandir(current_path) as it:
                 for entry in it:
                     entry_path = Path(entry.path)
                     if self._should_exclude(entry_path, exclude):
-                        logger.debug(f"Excluding path: {entry_path}")
                         continue
 
                     entry_arcname = f"{arc_prefix}/{entry.name}"
@@ -173,10 +174,8 @@ class TarTape:
                         self._scan_and_add(
                             entry_path, entry_arcname, recursive, exclude
                         )
-
-        except PermissionError as e:
-            logger.warning(f"Permission denied: {current_path}. Skipping directory.")
-            return
+        except PermissionError:
+            logger.warning(f"Permission denied: {current_path}")
 
     def add_file(
         self,
@@ -195,21 +194,26 @@ class TarTape:
         """
         p = Path(source_path)
         if self._should_exclude(p, exclude):
-            logger.debug(f"Excluding file: {p}")
             return
 
         name = arcname or p.name
-        # Ensure path uses Unix-style separators
-        name_unix = name.replace("\\", "/")
+        name_unix = Path(name).as_posix()
 
         entry = TarEntryFactory.create(p, name_unix)
         if entry:
-            self._entries.append(entry)
+            self._inventory.add(entry)
+            self._inventory.commit()
         else:
             # If entry is None, it was silently ignored (Socket/Pipe/etc)
             logger.info(f"Skipping unsupported file type: {p}")
 
-    def stream(self, chunk_size: int = 64 * 1024) -> Generator[TarEvent, None, None]:
-        """Starts the recording and emits the stream of events/bytes."""
-        engine = TarStreamGenerator(self._entries, chunk_size=chunk_size)
+    def stream(
+        self, chunk_size: int = 64 * 1024, resume_from: Optional[str | Path] = None
+    ) -> Generator[TarEvent, None, None]:
+        normalized_resume = None
+        if resume_from:
+            normalized_resume = Path(resume_from).as_posix()
+
+        entries_gen = self._inventory.get_entries(start_after=normalized_resume)
+        engine = TarStreamGenerator(entries_gen, chunk_size=chunk_size)
         yield from engine.stream()
