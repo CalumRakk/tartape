@@ -34,7 +34,9 @@ class TarEntryFactory:
     """
 
     @classmethod
-    def create(cls, source_path: Path, arcname: str) -> Optional[TarEntry]:
+    def create(
+        cls, source_path: Path, arcname: str, anonymize: bool = True
+    ) -> Optional[TarEntry]:
         """
         Analyzes a path and creates a TarEntry.
         Returns None if the file is an unsupported type (Socket, Pipe, etc).
@@ -49,6 +51,11 @@ class TarEntryFactory:
             return None
 
         file_mode, uid, gid, uname, gname = cls._extract_metadata(st)
+        if anonymize:
+            uid = 0
+            gid = 0
+            uname = "root"
+            gname = "root"
 
         linkname = ""
         size = st.st_size
@@ -113,8 +120,9 @@ class TarEntryFactory:
 class TarTape:
     """User-friendly interface for recording a TAR tape."""
 
-    def __init__(self, index_path: str = ":memory:"):
+    def __init__(self, index_path: str = ":memory:", anonymize: bool = True):
         self._inventory = SqlInventory(index_path)
+        self.anonymize = anonymize
 
     def _should_exclude(self, path: Path, exclude: Optional[ExcludeType]) -> bool:
         """Determines if a path should be skipped based on the 'exclude' parameter."""
@@ -199,7 +207,7 @@ class TarTape:
         name = arcname or p.name
         name_unix = Path(name).as_posix()
 
-        entry = TarEntryFactory.create(p, name_unix)
+        entry = TarEntryFactory.create(p, name_unix, anonymize=self.anonymize)
         if entry:
             self._inventory.add(entry)
             self._inventory.commit()

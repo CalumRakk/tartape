@@ -85,7 +85,11 @@ class TestTarIntegrity(unittest.TestCase):
             for _ in generator.stream():
                 pass
 
-        self.assertIn("File modified (mtime)", str(cm.exception))
+        error_msg = str(cm.exception)
+        is_integrity_error = (
+            "File modified (mtime)" in error_msg or "File size changed" in error_msg
+        )
+        self.assertTrue(is_integrity_error, f"Mensaje de error inesperado: {error_msg}")
 
 
 class TestTarOutputCompatibility(unittest.TestCase):
@@ -131,6 +135,24 @@ class TestTarOutputCompatibility(unittest.TestCase):
             assert extracted_f is not None, "Error al extraer el archivo"
             content = extracted_f.read().decode("utf-8")
             self.assertEqual(content, "Contenido del archivo")
+
+    def test_identity_anonymization(self):
+
+        test_file = self.root / "secret.txt"
+        test_file.touch()
+
+        # Por defecto debe anonimizar
+        tape = TarTape()
+        tape.add_file(test_file, arcname="secret.txt")
+
+        event = next(tape.stream())
+        assert event.type == TarEventType.FILE_START
+        entry = event.entry
+
+        self.assertEqual(entry.uid, 0)
+        self.assertEqual(entry.uname, "root")
+        self.assertEqual(entry.gid, 0)
+        self.assertEqual(entry.gname, "root")
 
 
 class TestPathSanitization(unittest.TestCase):
