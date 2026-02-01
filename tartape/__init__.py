@@ -80,7 +80,6 @@ class TarEntryFactory:
             uname=uname,
             gname=gname,
         )
-        entry.validate_compliance()
         return entry
 
     @staticmethod
