@@ -1,37 +1,32 @@
 # The TarTape Paradigm
 
-### 1. Introduction: Data Streaming vs. System Backup
-`tartape` is not just another implementation of the TAR standard. While it adheres to the USTAR format to ensure universal compatibility, its architecture stems from a need distinct from traditional tools like GNU `tar`.
+Most TAR tools were designed to back up operating systems (preserving users, local permissions, etc.).
 
-While traditional TAR was designed for **System Backup** (preserving the exact state of a physical machine), `tartape` is designed for **Data Streaming** (transporting information efficiently, securely, and reproducibly across networks and clouds).
+**TarTape** was born for something simpler: **moving data from one place to another over the internet.**
 
-### 2. Approach Comparison
+We don't try to be a Swiss Army Knife. We want to be a conveyor belt that never stops, wastes no memory, and—if the connection drops—knows exactly at which byte it left off to resume working.
 
-| Feature | System Backup (Traditional) | Data Streaming (TarTape) |
-| :--- | :--- | :--- |
-| **Primary Goal** | Restore a complete Operating System. | Synchronize and transport data between nodes. |
-| **Identity** | Preserves local UID/GID (vital for the OS). | Anonymizes Identity (privacy and portability). |
-| **Functionality** | Preserves permissions (execution, read). | Preserves permissions (user convenience). |
-| **Determinism** | Order is irrelevant (single final file). | Order is critical (defines offsets for resumption). |
-| **Integrity** | Based on the moment of reading. | Based on an "Instant Snapshot" (T0). |
+### The Golden Rule: The 512-Byte Contract
+In the TAR format, every file starts with a metadata header. In many programs, this header can grow unpredictably.
 
-### 3. The Three Pillars of TarTape
+In TarTape, we have decided that **the header will always measure exactly 512 bytes.**
 
-#### I. Determinism as a Contract
-In a streaming environment, especially when the flow is split into volumes or parts, the file order is not a suggestion—it is a **Sequence Contract**.
-If file A is processed before file B, this defines the exact byte where each one begins. `tartape` guarantees that this order is persistent to allow any streaming operation to be resumable bit-by-bit.
+This simplicity is our greatest advantage:
+*   If you know how many files there are and their size, you know exactly where each one starts in the stream.
+*   This allows you to "jump" to any point in a multi-Terabyte archive without having to read everything from the beginning.
+*   To achieve this without breaking the old 8GB limit (USTAR), we use a special encoding (GNU Base-256) that allows us to store giant sizes in the same space as always.
 
-#### II. Conscious Portability
-`tartape` distinguishes between **Identity** and **Behavior**:
-*   **Identity (UID/GID):** Considered "environmental noise" from the source system. It is flattened (anonymized) to ensure the backup does not leak private data and is reproducible on any machine.
-*   **Behavior (Permissions/Mode):** Faithfully preserved. An executable file at the source must remain executable at the destination.
+### The Three Pillars
 
-#### III. The "T0 Image" (Absolute Truth)
-For `tartape`, the archiving process is divided into two phases:
-1.  **T0 (Inventory):** The "Promise" is captured (Name, Size, mtime).
-2.  **T1 (Streaming):** The promise is executed.
+#### I. Determinism (Order Matters)
+If you process the same files twice, the result must be bit-for-bit identical. That is why TarTape sorts files alphabetically by default. If the flow is predictable, it is recoverable.
 
-If at time T1 the disk contradicts the promise made at T0 (the file mutated or changed size), `tartape` aborts the operation. This protects the integrity of the TAR structure and prevents the receiver from receiving inconsistent data.
+#### II. Privacy by Default (Anonymity)
+A cloud database doesn't care which user created the file on your laptop. TarTape scrubs usernames and local UIDs, keeping only what matters: content and execution permissions. This makes the final file cleaner and ensures the hash is always the same.
 
-### 4. Conclusion
-`tartape` sacrifices the standard capability of cloning operating systems in exchange for becoming a surgical tool for data transport. It is an engine designed for the cloud era, where **observability**, **resumability**, and **determinism** are more important than fidelity to local user IDs.
+#### III. The Promise (T0 Inventory)
+Before emitting any bytes, TarTape makes a "promise" (Inventory): "This file measures X and was modified at time Y".
+If, while reading the file to send it, the disk tells us the file has changed, **TarTape stops immediately.** We prefer to fail fast rather than generate a corrupt file in silence.
+
+### Conclusion
+`tartape` is a specialized tool. It intentionally trades the ability to clone operating systems to become an exceptionally predictable and observable engine for data transport.

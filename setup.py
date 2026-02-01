@@ -5,22 +5,29 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setuptools.setup(
     name="tartape",
-    version="1.5.0",
+    version="1.6.0",
     author="Leo",
     author_email="leocasti2@gmail.com",
-    description="An efficient, secure, and USTAR-compatible TAR streaming engine.",
+    description="An efficient, secure, and deterministic TAR streaming engine.",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/CalumRakk/tartape",
     packages=setuptools.find_packages(exclude=["tests*"]),
+    include_package_data=True,
+    package_data={"tartape": ["py.typed"]},
     classifiers=[
         "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
         "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",
         "Topic :: System :: Archiving",
+        "Intended Audience :: Developers",
     ],
     python_requires=">=3.10.0",
     install_requires=[
         "pydantic>=2.11.7",
     ],
+    keywords="tar, streaming, deterministic, resumable, cloud-backup, storage",
 )
