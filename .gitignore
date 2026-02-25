@@ -3,3 +3,4 @@ __pycache__/
 script.py
 *.egg-info
 venv_test/
+.contextignore

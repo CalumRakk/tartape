@@ -2,9 +2,9 @@ import logging
 import os
 import stat as stat_module
 from pathlib import Path
-from typing import Callable, Generator, List, Optional, Tuple, Union
+from typing import Callable, List, Optional, Tuple, Union
 
-from tartape.inventory import SqlInventory
+from tartape.models import Track
 
 try:
     import grp
@@ -13,8 +13,6 @@ except ImportError:
     pwd = None
     grp = None
 
-from .core import TarStreamGenerator
-from .schemas import TarEntry, TarEvent
 
 ExcludeType = Union[str, List[str], Callable[[Path], bool]]
 
@@ -34,14 +32,19 @@ class TarEntryFactory:
     """
 
     @classmethod
-    def create(
-        cls, source_path: Path, arcname: str, anonymize: bool = True
-    ) -> Optional[TarEntry]:
+    def create_track(
+        cls,
+        source_path: Union[Path, str],
+        rel_path: str,
+        arcname: str,
+        anonymize: bool = True,
+    ) -> Optional[Track]:
         """
         Analyzes a path and creates a TarEntry.
         Returns None if the file is an unsupported type (Socket, Pipe, etc).
         Raises OSError/FileNotFoundError if there are access issues.
         """
+        source_path = Path(source_path)
         st = source_path.lstat()
         mode = st.st_mode
 
@@ -52,10 +55,7 @@ class TarEntryFactory:
 
         file_mode, uid, gid, uname, gname = cls._extract_metadata(st)
         if anonymize:
-            uid = 0
-            gid = 0
-            uname = "root"
-            gname = "root"
+            uid, gid, uname, gname = 0, 0, "root", "root"
 
         linkname = ""
         size = st.st_size
@@ -66,9 +66,9 @@ class TarEntryFactory:
         elif is_dir:
             size = 0  # Directories have a size of 0 in the TAR header
 
-        entry = TarEntry(
-            source_path=str(source_path.absolute()),
+        return Track(
             arc_path=arcname,
+            rel_path=rel_path,
             size=size,
             mtime=st.st_mtime,
             is_dir=is_dir,
@@ -80,7 +80,6 @@ class TarEntryFactory:
             uname=uname,
             gname=gname,
         )
-        return entry
 
     @staticmethod
     def _diagnose_type(mode: int) -> Tuple[bool, bool, bool]:
@@ -121,108 +120,13 @@ class TarEntryFactory:
 class TarTape:
     """User-friendly interface for recording a TAR tape."""
 
-    def __init__(self, index_path: str = ":memory:", anonymize: bool = True):
-        self._inventory = SqlInventory(index_path)
-        self.anonymize = anonymize
+    # def stream(
+    #     self, chunk_size: int = 64 * 1024, resume_from: Optional[str | Path] = None
+    # ) -> Generator[TarEvent, None, None]:
+    #     normalized_resume = None
+    #     if resume_from:
+    #         normalized_resume = Path(resume_from).as_posix()
 
-    def _should_exclude(self, path: Path, exclude: Optional[ExcludeType]) -> bool:
-        """Determines if a path should be skipped based on the 'exclude' parameter."""
-        if exclude is None:
-            return False
-
-        # Function or Lambda
-        if callable(exclude):
-            return exclude(path)
-
-        # String único - glob patterns
-        if isinstance(exclude, str):
-            return path.match(exclude) or path.name == exclude
-
-        # List strings
-        if isinstance(exclude, list):
-            return any(path.match(p) or path.name == p for p in exclude)
-
-        return False
-
-    def add_folder(
-        self,
-        folder_path: str | Path,
-        recursive: bool = True,
-        exclude: Optional[ExcludeType] = None,
-    ):
-        """Scans a folder and adds its contents to the archive."""
-        root_path = Path(folder_path).absolute()
-        if not root_path.is_dir():
-            raise ValueError(
-                f"The path '{folder_path}' is not a directory or does not exist."
-            )
-        if not self._should_exclude(root_path, exclude):
-            self.add_file(root_path, arcname=root_path.name)
-            self._scan_and_add(root_path, root_path.name, recursive, exclude)
-
-        self._inventory.commit()
-
-    def _scan_and_add(
-        self,
-        current_path: Path,
-        arc_prefix: str,
-        recursive: bool,
-        exclude: Optional[ExcludeType],
-    ):
-        try:
-            with os.scandir(current_path) as it:
-                for entry in it:
-                    entry_path = Path(entry.path)
-                    if self._should_exclude(entry_path, exclude):
-                        continue
-
-                    entry_arcname = f"{arc_prefix}/{entry.name}"
-                    self.add_file(entry_path, arcname=entry_arcname)
-
-                    if recursive and entry.is_dir() and not entry.is_symlink():
-                        self._scan_and_add(
-                            entry_path, entry_arcname, recursive, exclude
-                        )
-        except PermissionError:
-            logger.warning(f"Permission denied: {current_path}")
-
-    def add_file(
-        self,
-        source_path: str | Path,
-        arcname: str | None = None,
-        exclude: Optional[ExcludeType] = None,
-    ):
-        """Adds a single file/entry to the tape.
-
-        Args:
-            source_path: Physical path to the file.
-            arcname: Target path inside the TAR archive.
-
-        Returns:
-            None
-        """
-        p = Path(source_path)
-        if self._should_exclude(p, exclude):
-            return
-
-        name = arcname or p.name
-        name_unix = Path(name).as_posix()
-
-        entry = TarEntryFactory.create(p, name_unix, anonymize=self.anonymize)
-        if entry:
-            self._inventory.add(entry)
-            self._inventory.commit()
-        else:
-            # If entry is None, it was silently ignored (Socket/Pipe/etc)
-            logger.info(f"Skipping unsupported file type: {p}")
-
-    def stream(
-        self, chunk_size: int = 64 * 1024, resume_from: Optional[str | Path] = None
-    ) -> Generator[TarEvent, None, None]:
-        normalized_resume = None
-        if resume_from:
-            normalized_resume = Path(resume_from).as_posix()
-
-        entries_gen = self._inventory.get_entries(start_after=normalized_resume)
-        engine = TarStreamGenerator(entries_gen, chunk_size=chunk_size)
-        yield from engine.stream()
+    #     entries_gen = self._inventory.get_entries(start_after=normalized_resume)
+    #     engine = TarStreamGenerator(entries_gen, chunk_size=chunk_size)
+    #     yield from engine.stream()
