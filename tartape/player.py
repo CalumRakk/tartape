@@ -1,13 +1,14 @@
-import hashlib
 import logging
 from pathlib import Path
-from typing import Generator
+from typing import Generator, cast
 
+import peewee
+
+from tartape.schemas import TarEvent
 from tartape.stream import TarStreamGenerator
 from tartape.tape import Tape
 
 from .models import Track
-from .schemas import TarEvent
 
 logger = logging.getLogger(__name__)
 
@@ -19,30 +20,122 @@ class TapePlayer:
 
     def verify(self) -> bool:
         """Compare the signature recorded (saved) on the tape with that of the current disk."""
-        recorded = self.tape.fingerprint
+        logger.info("Starting full integrity verification...")
 
-        sha = hashlib.sha256()
         for track in self.tape.get_tracks():
-            current_path = self.source_root / track.rel_path
-            try:
-                # TODO: Improve, this is a repeated business rule.
-                st = current_path.lstat()
-                entry_data = f"{track.arc_path}|{st.st_size}|{st.st_mtime}"
-                sha.update(entry_data.encode())
-            except FileNotFoundError:
-                sha.update(f"{track.arc_path}|MISSING|0".encode())
+            if not self._assert_track_integrity(track):
+                return False
 
-        current = sha.hexdigest()
-        is_valid = recorded == current
-        if not is_valid:
-            logger.warning(
-                "ATTENTION! The signature on the disk does not match the tape."
+        logger.info("Full integrity check PASSED.")
+        return True
+
+    def _assert_track_integrity(self, track: Track) -> bool:
+        """
+        Centralized method for validating a track against the disk.
+        Returns True if valid.
+        """
+        status = self._get_track_status(track)
+
+        if not status["exists"]:
+            logger.error(
+                f"Integrity FAILED: File missing -> {track.arc_path} (Expected at: {track.rel_path})"
             )
-        return is_valid
+            return False
+
+        if status["size"] != track.size or status["mtime"] != track.mtime:
+            logger.error(
+                f"Integrity FAILED: File mutated -> {track.arc_path}\n"
+                f"  Expected: size {track.size}, mtime {track.mtime}\n"
+                f"  Found:    size {status['size']}, mtime {status['mtime']}"
+            )
+            return False
+
+        return True
+
+    def _get_track_status(self, track: Track) -> dict:
+        """Gets current size and mtime of a track on disk."""
+        p = self.source_root / track.rel_path
+        try:
+            st = p.lstat()
+            return {"size": st.st_size, "mtime": int(st.st_mtime), "exists": True}
+        except FileNotFoundError:
+            return {"size": 0, "mtime": 0, "exists": False}
+
+    def spot_check(self, sample_size: int = 10) -> bool:
+        """
+        Select N files at random and check their integrity.
+        It is a quick way to detect if the folder has been altered
+        without processing the entire tape.
+        """
+        total_tracks = Track.select().count()
+        if total_tracks == 0:
+            return True
+
+        current_sample_size = min(sample_size, total_tracks)
+
+        # SQLite to give us N random records
+        samples = Track.select().order_by(peewee.fn.Random()).limit(current_sample_size)
+
+        logger.info(f"Performing spot check on {current_sample_size} random files...")
+
+        for track in samples:
+            if not self._assert_track_integrity(track):
+                return False
+
+        logger.info("Spot check PASSED.")
+        return True
+
+    def _verify_resume_point(self, offset: int):
+        """
+        Find the track containing the requested offset and validate its integrity.
+        Ensure the resume point is consistent.
+        """
+
+        if offset < 0:
+            raise ValueError(f"Offset cannot be negative: {offset}")
+
+        if offset >= self.tape.total_size:
+            raise ValueError(
+                f"Offset {offset} is beyond the total tape size ({self.tape.total_size})"
+            )
+
+        # If the offset falls here, there is no file to validate, it's just zeros.
+        if offset >= self.tape.total_size - 1024:
+            logger.info(
+                f"Resume point at {offset} falls into the TAR footer. No file validation needed."
+            )
+            return
+
+        try:
+            track = cast(
+                Track,
+                Track.get((Track.start_offset <= offset) & (Track.end_offset > offset)),
+            )
+
+            logger.info(f"Verifying resume point at file: {track.arc_path}")
+
+            if not self._assert_track_integrity(track):
+                raise RuntimeError(
+                    f"Resume integrity error: The file '{track.arc_path}' at offset {offset} "
+                    f"has changed or is missing. Cannot resume stream safely."
+                )
+
+        except Track.DoesNotExist:  # type: ignore
+            raise RuntimeError(
+                f"Critical error: No track found for offset {offset} despite being within bounds."
+            )
 
     def play(
         self, start_offset: int = 0, chunk_size: int = 64 * 1024
     ) -> Generator[TarEvent, None, None]:
+
+        if not self.spot_check(sample_size=10):
+            raise RuntimeError(
+                "Integrity check failed (spot check). The disk state does not match the tape."
+            )
+
+        if start_offset > 0:
+            self._verify_resume_point(start_offset)
 
         # Find those whose 'end_offset' is greater than our starting point
         query = (
