@@ -19,21 +19,23 @@ class TapeRecorder:
     def __init__(
         self,
         root_path: str | Path,
-        anonymize: bool = True,
         tartape_path: Optional[Path] = None,
+        exclude: Optional[ExcludeType] = None,
+        anonymize: bool = True,
     ):
-        self.anonymize = anonymize
         self.root_path = Path(root_path).absolute()
+        if not self.root_path.is_dir():
+            raise ValueError(f"La ruta raíz '{root_path}' debe ser un directorio.")
+
+        self.exclude = exclude
+        self.anonymize = anonymize
         self.tape_path = tartape_path or self.root_path / ".tartape"
 
-        if not self.root_path.is_dir():
-            raise ValueError(f"Root path {root_path} must be a directory.")
-        elif self.tape_path and self.tape_path.exists():
-            raise FileExistsError("There is already a .tartape file in the root path.")
+        if self.tape_path.exists():
+            raise FileExistsError(f"Ya existe una cinta en: {self.tape_path}")
 
         self._temp_dir = tempfile.TemporaryDirectory()
         self._temp_path = Path(self._temp_dir.name) / self.tape_path.name
-
         self.db_session = DatabaseSession(self._temp_path)
         self.db = self.db_session.start()
 
@@ -48,15 +50,13 @@ class TapeRecorder:
             sha.update(entry_data.encode())
         return sha.hexdigest()
 
-    def _persist_tape(self):
+    def _finalize_tape(self):
         self.db_session.close()
-
         if self.tape_path.exists():
             self.tape_path.unlink()
 
         shutil.move(str(self._temp_path), str(self.tape_path))
         logger.info(f"Tape successfully recorded on: {self.tape_path}")
-
         self._temp_dir.cleanup()
 
     def commit(self) -> str:
@@ -64,6 +64,8 @@ class TapeRecorder:
         Calculates offsets, generates signature and saves metadata.
         Returns the signature (fingerprint).
         """
+        self._scan_root()
+
         self.flush()
 
         current_offset = 0
@@ -104,22 +106,38 @@ class TapeRecorder:
                 key="total_size", value=str(total_tape_size)
             ).on_conflict_replace().execute()
 
-        self._persist_tape()
+        self._finalize_tape()
         return fingerprint
 
-    def close(self):
-        self.db_session.close()
+    def _scan_root(self):
+        prefix = self.root_path.name
+        self._add_to_buffer(self.root_path, arcname=prefix)
 
-    def add_file(self, source_path: Path, arcname: str):
-        """Parses a file and adds it to the insert buffer."""
-        source_path = source_path.absolute()
+        self._recursive_scan(self.root_path, prefix)
 
-        # Calculate the relative path with respect to the root folder
+    def _recursive_scan(self, current_path: Path, arc_prefix: str):
         try:
-            rel_path = str(source_path.relative_to(self.root_path))
-        except ValueError:
-            # The added file is not inside the root folder
-            rel_path = source_path.name
+            with os.scandir(current_path) as it:
+                for entry in it:
+                    entry_path = Path(entry.path)
+
+                    if self._should_exclude(entry_path):
+                        continue
+
+                    entry_arcname = f"{arc_prefix}/{entry.name}"
+                    self._add_to_buffer(entry_path, arcname=entry_arcname)
+
+                    if entry.is_dir() and not entry.is_symlink():
+                        self._recursive_scan(entry_path, entry_arcname)
+        except PermissionError:
+            logger.warning(f"Permission denied: {current_path}")
+
+    def _add_to_buffer(self, source_path: Path, arcname: str):
+        """Parses a file and adds it to the insert buffer."""
+
+        rel_path = str(source_path.relative_to(self.root_path))
+        if rel_path == ".":
+            rel_path = ""
 
         track = TarEntryFactory.create_track(
             source_path, arcname=arcname, rel_path=rel_path, anonymize=self.anonymize
@@ -133,71 +151,17 @@ class TapeRecorder:
             if len(self._buffer) >= self._batch_size:
                 self.flush()
 
-    def _should_exclude(self, path: Path, exclude: Optional[ExcludeType]) -> bool:
-        """Determines if a path should be skipped based on the 'exclude' parameter."""
-        if exclude is None:
+    def _should_exclude(self, path: Path) -> bool:
+        """Determines if a path should be skipped based on the 'self.exclude'."""
+        if self.exclude is None:
             return False
-
-        # Function or Lambda
-        if callable(exclude):
-            return exclude(path)
-
-        # String unique - glob patterns
-        if isinstance(exclude, str):
-            return path.match(exclude) or path.name == exclude
-
-        # List strings
-        if isinstance(exclude, list):
-            return any(path.match(p) or path.name == p for p in exclude)
-
+        if callable(self.exclude):
+            return self.exclude(path)
+        if isinstance(self.exclude, str):
+            return path.match(self.exclude) or path.name == self.exclude
+        if isinstance(self.exclude, list):
+            return any(path.match(p) or path.name == p for p in self.exclude)
         return False
-
-    def add_folder(
-        self,
-        folder_path: str | Path,
-        arcname: str = "",
-        recursive: bool = True,
-        exclude: Optional[ExcludeType] = None,
-    ):
-        root_path = Path(folder_path).absolute()
-        if not root_path.is_dir():
-            raise ValueError(f"Path '{folder_path}' is not a directory.")
-
-        # Prefix for TAR
-        prefix = arcname or root_path.name
-
-        if not self._should_exclude(root_path, exclude):
-            self.add_file(root_path, arcname=prefix)
-            self._scan_and_add(root_path, prefix, root_path, recursive, exclude)
-
-        self.flush()
-
-    def _scan_and_add(
-        self,
-        current_path: Path,
-        arc_prefix: str,
-        base_root: Path,
-        recursive: bool,
-        exclude: Optional[ExcludeType],
-    ):
-        try:
-            with os.scandir(current_path) as it:
-                for entry in it:
-                    entry_path = Path(entry.path)
-                    if self._should_exclude(entry_path, exclude):
-                        continue
-
-                    # arc_path: What will be seen in the TAR (ej: backup/fotos/vacas.jpg)
-                    entry_arcname = f"{arc_prefix}/{entry.name}"
-
-                    self.add_file(entry_path, arcname=entry_arcname)
-
-                    if recursive and entry.is_dir() and not entry.is_symlink():
-                        self._scan_and_add(
-                            entry_path, entry_arcname, base_root, recursive, exclude
-                        )
-        except PermissionError:
-            logger.warning(f"Permission denied: {current_path}")
 
     def flush(self):
         """Write the buffer to the database."""
@@ -209,3 +173,6 @@ class TapeRecorder:
             Track.insert_many(data).on_conflict_replace().execute()
 
         self._buffer = []
+
+    def close(self):
+        self.db_session.close()

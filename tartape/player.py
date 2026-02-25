@@ -126,8 +126,17 @@ class TapePlayer:
             )
 
     def play(
-        self, start_offset: int = 0, chunk_size: int = 64 * 1024
+        self,
+        start_offset: int = 0,
+        chunk_size: int = 64 * 1024,
+        fast_verify: bool = True,
     ) -> Generator[TarEvent, None, None]:
+        if fast_verify:
+            if not self.spot_check(sample_size=10):
+                raise RuntimeError("Integrity check failed (spot check)...")
+        else:
+            if not self.verify():
+                raise RuntimeError("Integrity check failed (full verify)...")
 
         if not self.spot_check(sample_size=10):
             raise RuntimeError(
