@@ -104,6 +104,7 @@ class TapeRecorder:
         )
 
         if track:
+            track._source_root = self.root_path
             self._buffer.append(track)
 
             if len(self._buffer) >= self._batch_size:

@@ -1,3 +1,6 @@
+from pathlib import Path
+from typing import cast
+
 from peewee import (
     BooleanField,
     CharField,
@@ -24,8 +27,8 @@ class TapeMetadata(BaseModel):
 class Track(BaseModel):
     """Represents a file/folder on the tape"""
 
-    arc_path = CharField(primary_key=True)
-    rel_path = CharField()
+    arc_path = cast(str, CharField(primary_key=True))
+    rel_path = cast(str, CharField())
 
     # Tar Header
     size = IntegerField()
@@ -42,3 +45,15 @@ class Track(BaseModel):
 
     start_offset = IntegerField(null=True)
     end_offset = IntegerField(null=True)
+
+    _source_root = None
+
+    @property
+    def source_path(self) -> Path:
+        if self._source_root is not None:
+            return Path(self._source_root) / self.rel_path
+        return Path(self.rel_path)
+
+    @source_path.setter
+    def source_path(self, value: Path):
+        self._source_root = value
