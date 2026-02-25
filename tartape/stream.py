@@ -20,6 +20,12 @@ from .schemas import (
 logger = logging.getLogger(__name__)
 
 
+class TarIntegrityError(Exception):
+    """Exception thrown when disk does not match inventory (ADR-002)."""
+
+    pass
+
+
 class TarStreamGenerator:
     def __init__(self, entries: Iterable[Track]):
         self.entries = entries
@@ -42,6 +48,7 @@ class TarStreamGenerator:
                 last_offset = entry.end_offset
                 continue
 
+            # Start event (only if we are not resuming in the middle of the file)
             if start_offset <= entry.start_offset:
                 yield self._create_event_start(entry)
 
@@ -55,7 +62,6 @@ class TarStreamGenerator:
                 yield from self._emit_padding(entry, start_offset)
 
             yield self._create_event_end(entry, md5_hash)
-
             last_offset = entry.end_offset
 
         yield from self._emit_tape_footer(start_offset, last_offset)
@@ -107,17 +113,20 @@ class TarStreamGenerator:
     def _stream_file_content_safely(
         self, entry: Track, global_skip: int, chunk_size: int
     ) -> Generator[TarEvent, None, Optional[str]]:
+        """Safely stream file content, ensuring that we do not read past the end of the file."""
 
         content_start = entry.start_offset + TAR_BLOCK_SIZE
         content_end = content_start + entry.size
 
         if global_skip >= content_end:
-            return None  # El salto cae después del contenido
+            return None  # Jump drops after content
 
         self._validate_integrity(entry)
 
         local_skip = max(0, global_skip - content_start)
         bytes_remaining = entry.size - local_skip
+
+        # Only calculate MD5 if we are reading the file from the beginning
         md5 = hashlib.md5() if local_skip == 0 else None
 
         try:
@@ -144,7 +153,7 @@ class TarStreamGenerator:
                     raise RuntimeError(f"File grew: '{entry.source_path}'")
 
         except OSError as e:
-            raise RuntimeError(f"Error reading {entry.source_path}") from e
+            raise TarIntegrityError(f"Error leyendo {entry.source_path}") from e
 
         return md5.hexdigest() if md5 else None
 
@@ -189,11 +198,11 @@ class TarStreamGenerator:
         try:
             st = entry.source_path.lstat()
         except OSError as e:
-            raise RuntimeError(f"File inaccessible: {entry.source_path}") from e
+            raise TarIntegrityError(f"Archivo inaccesible: {entry.source_path}") from e
 
         # Mtime Consistency
         # Using a tiny epsilon for float comparison safety
-        if abs(st.st_mtime - entry.mtime) > 1e-6:
+        if abs(st.st_mtime - entry.mtime) > 1e-4:
             msg = (
                 f"File modified (mtime) between inventory and stream: "
                 f"'{entry.source_path}'. Aborting."

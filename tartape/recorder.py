@@ -21,7 +21,8 @@ class TapeRecorder:
         anonymize: bool = True,
     ):
         self.root_path = Path(root_path).absolute()
-        self.db_session = DatabaseSession(tape_db_path)
+        self.tape_db_path = tape_db_path
+        self.db_session = DatabaseSession(self.tape_db_path)
         self.db = self.db_session.start()
         self.anonymize = anonymize
 
@@ -32,11 +33,13 @@ class TapeRecorder:
         self._batch_size = 300
 
     def clear(self):
+        """Deletes the current database."""
         with self.db.atomic():
             Track.delete().execute()
             TapeMetadata.delete().execute()
 
     def _calculate_fingerprint(self):
+        """Generates the identity hash based on the contents of the database."""
         sha = hashlib.sha256()
         for track in Track.select().order_by(Track.arc_path):
             entry_data = f"{track.arc_path}|{track.size}|{track.mtime}"
@@ -44,6 +47,10 @@ class TapeRecorder:
         return sha.hexdigest()
 
     def save(self) -> str:
+        """
+        Calculates offsets, generates signature and saves metadata.
+        Returns the signature (fingerprint).
+        """
         self.flush()
 
         current_offset = 0
@@ -90,6 +97,7 @@ class TapeRecorder:
         self.db_session.close()
 
     def add_file(self, source_path: Path, arcname: str):
+        """Parses a file and adds it to the insert buffer."""
         source_path = source_path.absolute()
 
         # Calculate the relative path with respect to the root folder
@@ -104,6 +112,7 @@ class TapeRecorder:
         )
 
         if track:
+            # We establish the root so that the factory can work with relative paths
             track._source_root = self.root_path
             self._buffer.append(track)
 
@@ -177,6 +186,7 @@ class TapeRecorder:
             logger.warning(f"Permission denied: {current_path}")
 
     def flush(self):
+        """Write the buffer to the database."""
         if not self._buffer:
             return
 
