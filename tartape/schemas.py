@@ -1,47 +1,51 @@
+from dataclasses import dataclass
 from typing import Literal, Optional, Union
-
-from pydantic import BaseModel
 
 from tartape.models import Track
 
-from .enums import TarEventType
 
-
-class FileStartMetadata(BaseModel):
+@dataclass(frozen=True)
+class FileStartMetadata:
     start_offset: int
+    resumed: bool
 
 
-class FileEndMetadata(BaseModel):
+@dataclass(frozen=True)
+class FileEndMetadata:
     end_offset: int
     md5sum: Optional[str]
+    is_complete: bool
 
 
-class TarFileStartEvent(BaseModel):
-    type: Literal[TarEventType.FILE_START]
+@dataclass(frozen=True)
+class TarFileStartEvent:
+    type: Literal["file_start"]
     entry: Track
     metadata: FileStartMetadata
 
     model_config = {"arbitrary_types_allowed": True}
 
 
-class TarFileDataEvent(BaseModel):
-    type: Literal[TarEventType.FILE_DATA]
-    entry: Optional[Track] = None
+@dataclass(frozen=True)
+class TarFileDataEvent:
+    type: Literal["file_data"]
     data: bytes
 
     model_config = {"arbitrary_types_allowed": True}
 
 
-class TarFileEndEvent(BaseModel):
-    type: Literal[TarEventType.FILE_END]
+@dataclass(frozen=True)
+class TarFileEndEvent:
+    type: Literal["file_end"]
     entry: Track
     metadata: FileEndMetadata
 
     model_config = {"arbitrary_types_allowed": True}
 
 
-class TarTapeCompletedEvent(BaseModel):
-    type: Literal[TarEventType.TAPE_COMPLETED]
+@dataclass(frozen=True)
+class TarTapeCompletedEvent:
+    type: Literal["tape_completed"]
 
 
 TarEvent = Union[

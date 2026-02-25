@@ -5,7 +5,6 @@ from typing import Generator, Iterable, Optional
 from tartape.header import TarHeader
 
 from .constants import CHUNK_SIZE_DEFAULT, TAR_BLOCK_SIZE, TAR_FOOTER_SIZE
-from .enums import TarEventType
 from .models import Track
 from .schemas import (
     FileEndMetadata,
@@ -50,7 +49,7 @@ class TarStreamGenerator:
 
             # Start event (only if we are not resuming in the middle of the file)
             if start_offset <= entry.start_offset:
-                yield self._create_event_start(entry)
+                yield self._create_event_start(entry, start_offset)
 
             yield from self._emit_header(entry, start_offset)
 
@@ -65,27 +64,31 @@ class TarStreamGenerator:
             last_offset = entry.end_offset
 
         yield from self._emit_tape_footer(start_offset, last_offset)
-        yield TarTapeCompletedEvent(type=TarEventType.TAPE_COMPLETED)
+        yield TarTapeCompletedEvent(type="tape_completed")
         logger.info("TAR stream completed successfully.")
 
     def _build_header(self, track: Track) -> bytes:
         header = TarHeader(track)
         return header.build()
 
-    def _create_event_start(self, entry: Track) -> TarFileStartEvent:
-
+    def _create_event_start(self, entry: Track, global_skip: int) -> TarFileStartEvent:
+        is_resumed = global_skip > entry.start_offset
         return TarFileStartEvent(
-            type=TarEventType.FILE_START,
+            type="file_start",
             entry=entry,
-            metadata=FileStartMetadata(start_offset=entry.start_offset),
+            metadata=FileStartMetadata(
+                start_offset=entry.start_offset, resumed=is_resumed
+            ),
         )
 
     def _create_event_end(self, entry: Track, md5: Optional[str]) -> TarFileEndEvent:
 
         return TarFileEndEvent(
-            type=TarEventType.FILE_END,
+            type="file_end",
             entry=entry,
-            metadata=FileEndMetadata(md5sum=md5, end_offset=entry.end_offset),
+            metadata=FileEndMetadata(
+                md5sum=md5, end_offset=entry.end_offset, is_complete=(md5 is not None)
+            ),
         )
 
     def _entry_has_content(self, entry: Track) -> bool:
@@ -106,9 +109,7 @@ class TarStreamGenerator:
         header_bytes = self._build_header(entry)[local_skip:]
 
         if header_bytes:
-            yield TarFileDataEvent(
-                type=TarEventType.FILE_DATA, data=header_bytes, entry=entry
-            )
+            yield TarFileDataEvent(type="file_data", data=header_bytes)
 
     def _stream_file_content_safely(
         self, entry: Track, global_skip: int, chunk_size: int
@@ -145,9 +146,7 @@ class TarStreamGenerator:
                         md5.update(chunk)
 
                     bytes_remaining -= len(chunk)
-                    yield TarFileDataEvent(
-                        type=TarEventType.FILE_DATA, data=chunk, entry=entry
-                    )
+                    yield TarFileDataEvent(type="file_data", data=chunk)
 
                 if local_skip == 0 and f.read(1):
                     raise RuntimeError(f"File grew: '{entry.source_path}'")
@@ -172,9 +171,7 @@ class TarStreamGenerator:
         padding_bytes = b"\0" * (padding_size - local_skip)
 
         if padding_bytes:
-            yield TarFileDataEvent(
-                type=TarEventType.FILE_DATA, data=padding_bytes, entry=entry
-            )
+            yield TarFileDataEvent(type="file_data", data=padding_bytes)
 
     def _emit_tape_footer(
         self, global_skip: int, footer_start: int
@@ -188,7 +185,7 @@ class TarStreamGenerator:
         footer = b"\0" * (TAR_FOOTER_SIZE - local_skip)
 
         if footer:
-            yield TarFileDataEvent(type=TarEventType.FILE_DATA, data=footer)
+            yield TarFileDataEvent(type="file_data", data=footer)
 
     def _validate_integrity(self, entry: Track):
         """

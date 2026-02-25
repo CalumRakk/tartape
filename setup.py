@@ -1,11 +1,13 @@
 import setuptools
 
+from tartape import __version__
+
 with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 
 setuptools.setup(
     name="tartape",
-    version="1.6.0",
+    version=__version__,
     author="Leo",
     author_email="leocasti2@gmail.com",
     description="An efficient, secure, and deterministic TAR streaming engine.",
@@ -27,7 +29,7 @@ setuptools.setup(
     ],
     python_requires=">=3.10.0",
     install_requires=[
-        "pydantic>=2.11.7",
+        "peewee>=4.0.0",
     ],
     keywords="tar, streaming, deterministic, resumable, cloud-backup, storage",
 )
