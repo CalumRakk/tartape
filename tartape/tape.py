@@ -20,8 +20,23 @@ class Tape:
     def open(cls, path: str | Path) -> "Tape":
         """Opens an existing tape."""
         if path != ":memory:" and not Path(path).exists():
-            raise FileNotFoundError(f"La cinta no existe en: {path}")
+            raise FileNotFoundError(f"The tape does not exist in: {path}")
         return cls(path)
+
+    @classmethod
+    def discover(cls, directory: str | Path) -> "Tape":
+        """
+        Automatically searches for a .tartape file in the given directory.
+        """
+        target_dir = Path(directory)
+        if not target_dir.is_dir():
+            raise NotADirectoryError(f"{directory} is not a valid directory.")
+
+        candidate = target_dir / ".tartape"
+        if candidate.exists() and candidate.is_file():
+            return cls(candidate)
+
+        raise FileNotFoundError(f"No tape (.tartape) found in {directory}")
 
     @property
     def fingerprint(self) -> str:

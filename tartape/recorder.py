@@ -1,13 +1,15 @@
 import hashlib
 import logging
 import os
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Optional
 
+from tartape.database import DatabaseSession
 from tartape.factory import ExcludeType, TarEntryFactory
 
 from .constants import TAR_BLOCK_SIZE, TAR_FOOTER_SIZE
-from .database import DatabaseSession
 from .models import TapeMetadata, Track
 
 logger = logging.getLogger(__name__)
@@ -17,26 +19,26 @@ class TapeRecorder:
     def __init__(
         self,
         root_path: str | Path,
-        tape_db_path: str = ":memory:",
         anonymize: bool = True,
+        tartape_path: Optional[Path] = None,
     ):
-        self.root_path = Path(root_path).absolute()
-        self.tape_db_path = tape_db_path
-        self.db_session = DatabaseSession(self.tape_db_path)
-        self.db = self.db_session.start()
         self.anonymize = anonymize
+        self.root_path = Path(root_path).absolute()
+        self.tape_path = tartape_path or self.root_path / ".tartape"
 
         if not self.root_path.is_dir():
             raise ValueError(f"Root path {root_path} must be a directory.")
+        elif self.tape_path and self.tape_path.exists():
+            raise FileExistsError("There is already a .tartape file in the root path.")
+
+        self._temp_dir = tempfile.TemporaryDirectory()
+        self._temp_path = Path(self._temp_dir.name) / self.tape_path.name
+
+        self.db_session = DatabaseSession(self._temp_path)
+        self.db = self.db_session.start()
 
         self._buffer = []
         self._batch_size = 300
-
-    def clear(self):
-        """Deletes the current database."""
-        with self.db.atomic():
-            Track.delete().execute()
-            TapeMetadata.delete().execute()
 
     def _calculate_fingerprint(self):
         """Generates the identity hash based on the contents of the database."""
@@ -46,7 +48,18 @@ class TapeRecorder:
             sha.update(entry_data.encode())
         return sha.hexdigest()
 
-    def save(self) -> str:
+    def _persist_tape(self):
+        self.db_session.close()
+
+        if self.tape_path.exists():
+            self.tape_path.unlink()
+
+        shutil.move(str(self._temp_path), str(self.tape_path))
+        logger.info(f"Tape successfully recorded on: {self.tape_path}")
+
+        self._temp_dir.cleanup()
+
+    def commit(self) -> str:
         """
         Calculates offsets, generates signature and saves metadata.
         Returns the signature (fingerprint).
@@ -91,6 +104,7 @@ class TapeRecorder:
                 key="total_size", value=str(total_tape_size)
             ).on_conflict_replace().execute()
 
+        self._persist_tape()
         return fingerprint
 
     def close(self):
