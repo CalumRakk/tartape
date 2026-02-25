@@ -35,8 +35,8 @@ class Track(BaseModel):
     mode = cast(int, IntegerField())
     uid = cast(int, IntegerField())
     gid = cast(int, IntegerField())
-    uname = cast(str, CharField)
-    gname = cast(str, CharField)
+    uname = cast(str, CharField())
+    gname = cast(str, CharField())
 
     is_dir = BooleanField(default=False)
     is_symlink = BooleanField(default=False)
