@@ -2,24 +2,9 @@ from typing import Literal, Optional, Union
 
 from pydantic import BaseModel
 
+from tartape.models import Track
+
 from .enums import TarEventType
-
-
-class TarEntry(BaseModel):
-    """Represents an item to be recorded on the tape."""
-
-    rel_path: str  # Path relative to the root
-    arc_path: str  # Path inside the TAR
-    size: int
-    mtime: float
-    is_dir: bool = False
-    uid: int
-    gid: int
-    mode: int
-    uname: str
-    gname: str
-    is_symlink: bool = False
-    linkname: str = ""
 
 
 class FileStartMetadata(BaseModel):
@@ -33,20 +18,26 @@ class FileEndMetadata(BaseModel):
 
 class TarFileStartEvent(BaseModel):
     type: Literal[TarEventType.FILE_START]
-    entry: TarEntry
+    entry: Track
     metadata: FileStartMetadata
+
+    model_config = {"arbitrary_types_allowed": True}
 
 
 class TarFileDataEvent(BaseModel):
     type: Literal[TarEventType.FILE_DATA]
-    entry: Optional[TarEntry] = None
+    entry: Optional[Track] = None
     data: bytes
+
+    model_config = {"arbitrary_types_allowed": True}
 
 
 class TarFileEndEvent(BaseModel):
     type: Literal[TarEventType.FILE_END]
-    entry: TarEntry
+    entry: Track
     metadata: FileEndMetadata
+
+    model_config = {"arbitrary_types_allowed": True}
 
 
 class TarTapeCompletedEvent(BaseModel):

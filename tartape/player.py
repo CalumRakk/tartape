@@ -3,7 +3,8 @@ import logging
 from pathlib import Path
 from typing import Generator
 
-from .core import TarStreamGenerator
+from tartape.stream import TarStreamGenerator
+
 from .database import DatabaseSession
 from .models import TapeMetadata, Track
 from .schemas import TarEvent
@@ -69,8 +70,12 @@ class TapePlayer:
                 track._source_root = self.source_root
                 yield track
 
-        engine = TarStreamGenerator(track_to_entry_gen(), chunk_size=chunk_size)
-        yield from engine.stream(skip_to_offset=start_offset)
+        engine = TarStreamGenerator(track_to_entry_gen())
+        yield from engine.stream(start_offset=start_offset, chunk_size=chunk_size)
 
     def close(self):
         self.db_session.close()
+
+    def get_offset_of(self, arc_path: str) -> int:
+        track = Track.get(Track.arc_path == arc_path)
+        return track.start_offset

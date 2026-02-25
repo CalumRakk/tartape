@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from tartape import ExcludeType, TarEntryFactory
+from tartape.factory import ExcludeType, TarEntryFactory
 
 from .constants import TAR_BLOCK_SIZE, TAR_FOOTER_SIZE
 from .database import DatabaseSession

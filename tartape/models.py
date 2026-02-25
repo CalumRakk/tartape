@@ -4,7 +4,6 @@ from typing import cast
 from peewee import (
     BooleanField,
     CharField,
-    FloatField,
     IntegerField,
     Model,
 )
@@ -31,20 +30,20 @@ class Track(BaseModel):
     rel_path = cast(str, CharField())
 
     # Tar Header
-    size = IntegerField()
-    mtime = FloatField()
-    mode = IntegerField()
-    uid = IntegerField()
-    gid = IntegerField()
-    uname = CharField()
-    gname = CharField()
+    size = cast(int, IntegerField())
+    mtime = cast(int, IntegerField())
+    mode = cast(int, IntegerField())
+    uid = cast(int, IntegerField())
+    gid = cast(int, IntegerField())
+    uname = cast(str, CharField)
+    gname = cast(str, CharField)
 
     is_dir = BooleanField(default=False)
     is_symlink = BooleanField(default=False)
-    linkname = CharField(null=True)
+    linkname = cast(str, CharField(null=True))
 
-    start_offset = IntegerField(null=True)
-    end_offset = IntegerField(null=True)
+    start_offset = cast(int, IntegerField(null=True))
+    end_offset = cast(int, IntegerField(null=True))
 
     _source_root = None
 
