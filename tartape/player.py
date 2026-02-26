@@ -3,8 +3,6 @@ import os
 from pathlib import Path
 from typing import Generator, cast
 
-import peewee
-
 from tartape.schemas import TarEvent
 from tartape.stream import TarStreamGenerator
 from tartape.tape import Tape
@@ -96,7 +94,7 @@ class TapePlayer:
             return
 
         current_sample_size = min(sample_size, total_tracks)
-
+        import peewee
         # SQLite to give us N random records
         samples = Track.select().order_by(peewee.fn.Random()).limit(current_sample_size)
 

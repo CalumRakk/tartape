@@ -9,11 +9,14 @@ In a TAR archive generation engine based on streaming, the size of each file mus
 Unlike a traditional backup where one might try to "reflect the present," `tartape` is used in network environments and volume systems where consistency is critical. If a file mutates (changes in size or modification time) between the moment it was inventoried and the moment the stream is generated, the original "snapshot" is no longer valid, and any offset previously calculated to resume the upload becomes invalidated.
 
 ## Decision
-`tartape` will implement an **"Immutable Integrity Contract"** model based on the initial state of the files:
+`tartape` will implement an **"Immutable Integrity Contract"** with specific rules for different entry types:
 
-1.  **Promise Validation:** The engine will treat the size (`size`) and modification time (`mtime`) metadata captured during the initial inventory (T0) as the only acceptable truth.
-2.  **Runtime Verification:** During the streaming process (T1), right before and during the reading of each file, the engine will compare the current disk state with the T0 "promise."
-3.  **Explicit Failure (Abort):** If any discrepancy is detected (the file grew, shrank, or was modified), `tartape` will stop the process immediately by raising an integrity exception. No attempt will be made to repair the flow or fill with empty data, ensuring that the receiver never receives a structurally inconsistent TAR file.
+1.  **File Integrity:** For regular files, the engine treats `size` and `mtime` captured at T0 as the absolute truth. Any discrepancy at T1 (playback) will trigger an immediate abort.
+2.  **Structural Integrity (Directories):**
+    *   **Sub-directories:** Changes in `mtime` are treated as structural violations (indicating that files were added or removed) and will trigger an abort.
+    *   **Root Directory Exception:** The `mtime` of the root directory is **ignored**. This allows the engine to store and update its internal metadata (`.tartape/`) without self-invalidating the snapshot.
+3.  **Strict Mode:** The engine operates in a "Fail-Fast" mode. It does not attempt to repair the stream or skip inconsistent files; it stops to guarantee that the receiver never gets a partial or misleading archive.
+4.  **Exclusion Rules:** Internal engine files (`.tartape/` folder and SQLite temporary files) are globally excluded from integrity checks and the resulting data stream.
 
 ## Consequences
 

@@ -18,9 +18,6 @@ setuptools.setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/CalumRakk/tartape",
-    packages=setuptools.find_packages(exclude=["tests*"]),
-    include_package_data=True,
-    package_data={"tartape": ["py.typed"]},
     classifiers=[
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.10",
@@ -31,6 +28,7 @@ setuptools.setup(
         "Topic :: System :: Archiving",
         "Intended Audience :: Developers",
     ],
+    packages=setuptools.find_packages(),
     python_requires=">=3.10.0",
     install_requires=[
         "peewee==4.0.0",
