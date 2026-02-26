@@ -1,13 +1,17 @@
 import setuptools
 
-from tartape import __version__
+def get_version():
+    with open("tartape/__init__.py") as f:
+        for line in f:
+            if line.startswith("__version__"):
+                return line.split("=")[1].strip().strip('"')
 
 with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 
 setuptools.setup(
     name="tartape",
-    version=__version__,
+    version=get_version(),
     author="Leo",
     author_email="leocasti2@gmail.com",
     description="An efficient, secure, and deterministic TAR streaming engine.",
