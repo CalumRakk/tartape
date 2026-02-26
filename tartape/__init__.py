@@ -4,4 +4,4 @@ from .stream import TarStreamGenerator
 from .tape import Tape
 
 __all__ = ["Tape", "TapeRecorder", "TapePlayer", "TarStreamGenerator"]
-__version__ = "0.9.4"
+__version__ = "2.0.0b1"
