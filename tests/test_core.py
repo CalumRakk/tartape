@@ -1,12 +1,15 @@
 import io
+import os
 import tarfile
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
-from tartape import TarEntryFactory, TarTape
-from tartape.core import TarStreamGenerator
-from tartape.enums import TarEventType
+from tartape.player import TapePlayer
+from tartape.recorder import TapeRecorder
+from tartape.schemas import TarFileDataEvent
+from tartape.tape import Tape
 
 
 class TestTarIntegrity(unittest.TestCase):
@@ -16,165 +19,132 @@ class TestTarIntegrity(unittest.TestCase):
     """
 
     def setUp(self):
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp_dir.name)
+        self.temp = tempfile.TemporaryDirectory()
+        self.base_path = Path(self.temp.name) / "data"
 
     def tearDown(self):
-        self.tmp_dir.cleanup()
+        self.temp.cleanup()
 
-    def test_file_grows_during_streaming(self):
+    def _create_test_file(self, name: str, content: str = "hello world"):
+        p = self.base_path / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content)
+        return p
+
+    def test_full_workflow_and_compatibility(self):
         """
-        Simula que un archivo cambia de tamaño DESPUÉS de ser analizado
-        pero ANTES de terminar de ser leído. Debe lanzar RuntimeError.
+        Graba una carpeta, la abre con el Player y
+        verifica que 'tarfile' pueda leer el stream resultante.
         """
-        file_path = self.root / "crecimiento.txt"
+        self._create_test_file("hola.txt", "Contenido 1")
+        self._create_test_file("sub/mundo.txt", "Contenido 2")
 
-        with open(file_path, "w") as f:
-            f.write("HELLO")  # 5 bytes
+        recorder = TapeRecorder(self.base_path)
+        recorder.commit()
 
-        entry = TarEntryFactory.create(file_path, "crecimiento.txt")
-        assert entry is not None, "Error al crear la entrada"
-        self.assertEqual(entry.size, 5)
+        with Tape.discover(self.base_path) as tape:
+            self.assertGreater(tape.total_size, 0)
 
-        # Modificar el archivo en disco
-        with open(file_path, "a") as f:
-            f.write("WORLD")
+            player = TapePlayer(tape, source_root=self.base_path)
 
-        generator = TarStreamGenerator([entry])
-        with self.assertRaises(RuntimeError) as cm:
-            for _ in generator.stream():
-                pass
+            buffer = io.BytesIO()
+            for event in player.play(fast_verify=False):
+                if isinstance(event, TarFileDataEvent):
+                    buffer.write(event.data)
 
-        error_msg = str(cm.exception)
-        is_integrity_error = (
-            "File modified (mtime)" in error_msg or "File size changed" in error_msg
-        )
-        self.assertTrue(is_integrity_error, f"Mensaje de error inesperado: {error_msg}")
+            buffer.seek(0)
 
+            with tarfile.open(fileobj=buffer, mode="r:") as tf:
+                names = tf.getnames()
+                self.assertIn("data/hola.txt", names)
+                self.assertIn("data/sub/mundo.txt", names)
 
-class TestTarOutputCompatibility(unittest.TestCase):
-    """
-    Prueba de integración: Generamos un TAR en memoria y usamos
-    la librería estándar 'tarfile' de Python para intentar leerlo.
-    Si 'tarfile' lo lee, es compatible.
-    """
+                content = tf.extractfile("data/hola.txt").read().decode()  # type: ignore
+                self.assertEqual(content, "Contenido 1")
 
-    def setUp(self):
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp_dir.name)
+    def test_integrity_failure_size_changed(self):
+        """ADR-002: Si el archivo cambia de tamaño tras la grabación, el Player debe abortar."""
+        f = self._create_test_file("mutante.txt", "original")
 
-    def tearDown(self):
-        self.tmp_dir.cleanup()
+        recorder = TapeRecorder(self.base_path)
+        recorder.commit()
 
-    def test_compatibility_with_standard_library(self):
-        (self.root / "carpeta").mkdir()
-        (self.root / "carpeta" / "hola.txt").write_text("Contenido del archivo")
+        # Modificamos el archivo en disco DESPUÉS de grabar la cinta
+        f.write_text("contenido mucho mas largo")
 
-        tape = TarTape()
-        tape.add_folder(self.root / "carpeta")
+        with Tape.discover(self.base_path) as tape:
+            player = TapePlayer(tape, source_root=self.base_path)
 
-        # Strimeamos y guardamos los datos en memoria (buffer)
-        buffer = io.BytesIO()
-        for event in tape.stream():
-            if event.type == TarEventType.FILE_DATA:
-                buffer.write(event.data)
+            with self.assertRaisesRegex(RuntimeError, "File size changed"):
+                for _ in player.play(fast_verify=False):
+                    pass
 
-        buffer.seek(0)
+    def test_integrity_failure_mtime_changed(self):
+        """ADR-002: Si el mtime cambia (aunque el tamaño sea igual), el Player debe abortar."""
+        f = self._create_test_file("stale.txt", "mismo_tamano")
 
-        # Validamos con la libreria estandar de python tarfile
-        with tarfile.open(fileobj=buffer, mode="r:") as tf:
-            names = tf.getnames()
+        recorder = TapeRecorder(self.base_path)
+        recorder.commit()
 
-            self.assertIn("carpeta", names)
-            self.assertIn("carpeta/hola.txt", names)
+        future_time = time.time() + 100
 
-            member = tf.getmember("carpeta/hola.txt")
-            self.assertEqual(member.size, len("Contenido del archivo"))
+        os.utime(f, (future_time, future_time))
 
-            extracted_f = tf.extractfile(member)
-            assert extracted_f is not None, "Error al extraer el archivo"
-            content = extracted_f.read().decode("utf-8")
-            self.assertEqual(content, "Contenido del archivo")
+        with Tape.discover(self.base_path) as tape:
+            player = TapePlayer(tape, source_root=self.base_path)
+
+            with self.assertRaisesRegex(RuntimeError, "File modified"):
+                for _ in player.play(fast_verify=False):
+                    pass
+
+    def test_resume_at_specific_offset(self):
+        """
+        Prueba que el Player puede saltar bytes y el stream sigue siendo válido
+        para la librería estándar (usando recortes).
+        """
+        self._create_test_file("a.txt", "AAAAA")  # 5 bytes + header + padding
+        self._create_test_file("b.txt", "BBBBB")
+
+        recorder = TapeRecorder(self.base_path)
+        recorder.commit()
+
+        with Tape.discover(self.base_path) as tape:
+
+            # Obtenemos el offset de inicio del segundo archivo (b.txt)
+            tracks = list(tape.get_tracks())
+            # track[0]=dir, [1]=a.txt, [2]=b.txt
+            target_track = tracks[2]
+            start_at = target_track.start_offset
+
+            player = TapePlayer(tape, source_root=self.base_path)
+
+            buffer = io.BytesIO()
+            for event in player.play(start_offset=start_at, fast_verify=False):
+                if isinstance(event, TarFileDataEvent):
+                    buffer.write(event.data)
+
+            buffer.seek(0)
+
+            # El buffer resultante solo debería contener a b.txt y el footer
+            with tarfile.open(fileobj=buffer, mode="r:") as tf:
+                names = tf.getnames()
+                self.assertEqual(len(names), 1)
+                self.assertEqual(names[0], "data/b.txt")
 
     def test_identity_anonymization(self):
+        """ADR-003: Verifica que por defecto se anonimicen UID/GID y nombres."""
+        self._create_test_file("secret.txt")
 
-        test_file = self.root / "secret.txt"
-        test_file.touch()
+        recorder = TapeRecorder(self.base_path, anonymize=True)
+        recorder.commit()
 
-        # Por defecto debe anonimizar
-        tape = TarTape()
-        tape.add_file(test_file, arcname="secret.txt")
+        with Tape.discover(self.base_path) as tape:
+            track = list(tape.get_tracks())[1]
 
-        event = next(tape.stream())
-        assert event.type == TarEventType.FILE_START
-        entry = event.entry
-
-        self.assertEqual(entry.uid, 0)
-        self.assertEqual(entry.uname, "root")
-        self.assertEqual(entry.gid, 0)
-        self.assertEqual(entry.gname, "root")
-
-
-class TestPathSanitization(unittest.TestCase):
-    """
-    Intenta 'romper' el motor inyectando rutas estilo Windows (con backslashes).
-    El motor DEBE normalizarlas a estilo UNIX para cumplir el estándar.
-    """
-
-    def setUp(self):
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp_dir.name)
-
-        self.dummy_file = self.root / "dummy.txt"
-        self.dummy_file.touch()
-
-    def tearDown(self):
-        self.tmp_dir.cleanup()
-
-    def _get_tar_names(self, tape: TarTape) -> list[str]:
-        """Helper para generar el TAR en memoria y devolver los nombres internos."""
-        buffer = io.BytesIO()
-        for event in tape.stream():
-            if event.type == TarEventType.FILE_DATA:
-                buffer.write(event.data)
-        buffer.seek(0)
-
-        with tarfile.open(fileobj=buffer, mode="r:") as tf:
-            return tf.getnames()
-
-    def test_manual_injection_of_windows_path(self):
-        """
-        Inyecta manualmente una ruta con backslashes en arcname.
-
-        ESPERADO: El sistema debería reemplazar '\\' por '/' automáticamente.
-        """
-        tape = TarTape()
-        dirty_path = "carpeta\\subcarpeta\\archivo_win.txt"
-
-        tape.add_file(self.dummy_file, arcname=dirty_path)
-
-        names = self._get_tar_names(tape)
-
-        # Verificamos que no haya backslashes
-        self.assertNotIn(dirty_path, names, "¡FALLO! El TAR contiene backslashes.")
-
-        # Verificamos que se haya normalizado
-        clean_path = "carpeta/subcarpeta/archivo_win.txt"
-        self.assertIn(clean_path, names, "La ruta no fue normalizada a UNIX format.")
-
-    def test_mixed_separators(self):
-        """
-        Inyecta una mezcla horrible de separadores.
-        """
-        tape = TarTape()
-        mixed_path = "data/win\\logs/error.log"
-
-        tape.add_file(self.dummy_file, arcname=mixed_path)
-
-        names = self._get_tar_names(tape)
-
-        expected = "data/win/logs/error.log"
-        self.assertIn(expected, names)
+            self.assertEqual(track.uid, 0)
+            self.assertEqual(track.uname, "root")
+            self.assertEqual(track.gid, 0)
+            self.assertEqual(track.gname, "root")
 
 
 if __name__ == "__main__":

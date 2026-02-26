@@ -3,8 +3,6 @@ from typing import Literal, Union
 
 import peewee
 
-from tartape.models import TapeMetadata, Track
-
 db_proxy = peewee.Proxy()
 
 
@@ -35,6 +33,8 @@ class DatabaseSession:
 
         db_proxy.initialize(self.db)
         self.db.connect()
+
+        from tartape.models import TapeMetadata, Track
 
         db_proxy.create_tables(
             [Track, TapeMetadata],

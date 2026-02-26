@@ -1,8 +1,13 @@
+import logging
 from pathlib import Path
 from typing import Iterable
 
+import peewee
+
 from .database import DatabaseSession
 from .models import TapeMetadata, Track
+
+logger = logging.getLogger(__name__)
 
 
 class Tape:
@@ -14,14 +19,21 @@ class Tape:
     def __init__(self, db_path: str | Path):
         self.path = Path(db_path)
         self._session = DatabaseSession(self.path)
-        self.db = self._session.start()
+        self.db = None
 
     @classmethod
     def open(cls, path: str | Path) -> "Tape":
         """Opens an existing tape."""
+        logger.info(f"Opening tape from: {path}")
         if path != ":memory:" and not Path(path).exists():
             raise FileNotFoundError(f"The tape does not exist in: {path}")
-        return cls(path)
+        try:
+            return cls(path)
+        except peewee.OperationalError:
+            logger.error(f"Failed to open tape at {path}. Is it a valid tape file?")
+            raise FileNotFoundError(
+                f"Failed to open tape at {path}. Is it a valid tape file?"
+            )
 
     @classmethod
     def discover(cls, directory: str | Path) -> "Tape":
@@ -32,7 +44,7 @@ class Tape:
         if not target_dir.is_dir():
             raise NotADirectoryError(f"{directory} is not a valid directory.")
 
-        candidate = target_dir / ".tartape"
+        candidate = target_dir.parent / f"{target_dir.name}.tartape"
         if candidate.exists() and candidate.is_file():
             return cls(candidate)
 
@@ -56,3 +68,9 @@ class Tape:
     def close(self):
         """Close the connection to the tape database."""
         self._session.close()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+    def __enter__(self):
+        return self

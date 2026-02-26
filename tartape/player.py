@@ -18,18 +18,17 @@ class TapePlayer:
         self.tape = tape
         self.source_root = Path(source_root).absolute()
 
-    def verify(self) -> bool:
+    def _verify(self) -> bool:
         """Compare the signature recorded (saved) on the tape with that of the current disk."""
         logger.info("Starting full integrity verification...")
 
         for track in self.tape.get_tracks():
-            if not self._assert_track_integrity(track):
-                return False
+            self._assert_track_integrity(track)
 
         logger.info("Full integrity check PASSED.")
         return True
 
-    def _assert_track_integrity(self, track: Track) -> bool:
+    def _assert_track_integrity(self, track: Track):
         """
         Centralized method for validating a track against the disk.
         Returns True if valid.
@@ -37,20 +36,16 @@ class TapePlayer:
         status = self._get_track_status(track)
 
         if not status["exists"]:
-            logger.error(
-                f"Integrity FAILED: File missing -> {track.arc_path} (Expected at: {track.rel_path})"
-            )
-            return False
+            raise RuntimeError(f"Integrity FAILED: File missing -> {track.arc_path}")
 
-        if status["size"] != track.size or status["mtime"] != track.mtime:
-            logger.error(
-                f"Integrity FAILED: File mutated -> {track.arc_path}\n"
-                f"  Expected: size {track.size}, mtime {track.mtime}\n"
-                f"  Found:    size {status['size']}, mtime {status['mtime']}"
-            )
-            return False
+        if status["mtime"] != track.mtime:
+            raise RuntimeError(f"File modified (mtime): {track.arc_path}")
 
-        return True
+        if not (track.is_dir or track.is_symlink):
+            if status["size"] != track.size:
+                raise RuntimeError(
+                    f"File size changed: '{track.arc_path}'. Expected {track.size}, found {status['size']}."
+                )
 
     def _get_track_status(self, track: Track) -> dict:
         """Gets current size and mtime of a track on disk."""
@@ -61,7 +56,7 @@ class TapePlayer:
         except FileNotFoundError:
             return {"size": 0, "mtime": 0, "exists": False}
 
-    def spot_check(self, sample_size: int = 10) -> bool:
+    def _spot_check(self, sample_size: int = 10):
         """
         Select N files at random and check their integrity.
         It is a quick way to detect if the folder has been altered
@@ -69,7 +64,7 @@ class TapePlayer:
         """
         total_tracks = Track.select().count()
         if total_tracks == 0:
-            return True
+            return
 
         current_sample_size = min(sample_size, total_tracks)
 
@@ -79,11 +74,9 @@ class TapePlayer:
         logger.info(f"Performing spot check on {current_sample_size} random files...")
 
         for track in samples:
-            if not self._assert_track_integrity(track):
-                return False
+            self._assert_track_integrity(track)
 
         logger.info("Spot check PASSED.")
-        return True
 
     def _verify_resume_point(self, offset: int):
         """
@@ -111,15 +104,8 @@ class TapePlayer:
                 Track,
                 Track.get((Track.start_offset <= offset) & (Track.end_offset > offset)),
             )
-
             logger.info(f"Verifying resume point at file: {track.arc_path}")
-
-            if not self._assert_track_integrity(track):
-                raise RuntimeError(
-                    f"Resume integrity error: The file '{track.arc_path}' at offset {offset} "
-                    f"has changed or is missing. Cannot resume stream safely."
-                )
-
+            self._assert_track_integrity(track)
         except Track.DoesNotExist:  # type: ignore
             raise RuntimeError(
                 f"Critical error: No track found for offset {offset} despite being within bounds."
@@ -131,19 +117,15 @@ class TapePlayer:
         chunk_size: int = 64 * 1024,
         fast_verify: bool = True,
     ) -> Generator[TarEvent, None, None]:
-        if fast_verify:
-            if not self.spot_check(sample_size=10):
-                raise RuntimeError("Integrity check failed (spot check)...")
-        else:
-            if not self.verify():
-                raise RuntimeError("Integrity check failed (full verify)...")
+        logger.debug("Starting tape playback...")
 
-        if not self.spot_check(sample_size=10):
-            raise RuntimeError(
-                "Integrity check failed (spot check). The disk state does not match the tape."
-            )
+        if fast_verify:
+            self._spot_check(sample_size=15)
+        else:
+            self._verify()
 
         if start_offset > 0:
+            logger.info(f"Resuming stream from offset: {start_offset} bytes")
             self._verify_resume_point(start_offset)
 
         # Find those whose 'end_offset' is greater than our starting point

@@ -3,8 +3,9 @@ import tarfile
 import unittest
 from typing import cast
 
-from tartape.core import TarHeader
-from tartape.schemas import TarEntry
+from tartape.database import DatabaseSession
+from tartape.header import TarHeader
+from tartape.models import Track
 
 
 class TestHeaderCompliance(unittest.TestCase):
@@ -12,25 +13,37 @@ class TestHeaderCompliance(unittest.TestCase):
     Pruebas quirúrgicas para el contrato de 512 bytes y ADR-004.
     """
 
-    def _create_minimal_entry(self, **kwargs):
-        """Helper para crear una entrada válida mínima."""
+    @classmethod
+    def setUpClass(cls):
+        cls.db_session = DatabaseSession(":memory:")
+        cls.db = cls.db_session.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.db_session.close()
+
+    def _create_minimal_track(self, **kwargs) -> Track:
+        """Helper para crear una instancia de Track válida para pruebas de header."""
         defaults = {
-            "source_path": "/tmp/fake",
             "arc_path": "file.txt",
+            "rel_path": "path/to/file.txt",
             "size": 100,
-            "mtime": 1700000000.0,
+            "mtime": 1700000000,
             "mode": 0o644,
             "uid": 0,
             "gid": 0,
             "uname": "root",
             "gname": "root",
+            "is_dir": False,
+            "is_symlink": False,
+            "linkname": "",
         }
         defaults.update(kwargs)
-        return TarEntry(**defaults)
+        return Track(**defaults)
 
     def test_standard_header_size(self):
         """Verifica que un archivo normal genera exactamente 512 bytes."""
-        entry = self._create_minimal_entry()
+        entry = self._create_minimal_track()
         header = TarHeader(entry)
         self.assertEqual(len(header.build()), 512)
 
@@ -40,7 +53,7 @@ class TestHeaderCompliance(unittest.TestCase):
         usando la codificación Base-256 de GNU.
         """
         large_size = 9 * 1024 * 1024 * 1024  # 9 GiB
-        entry = self._create_minimal_entry(size=large_size)
+        entry = self._create_minimal_track(size=large_size)
 
         header = TarHeader(entry).build()
         self.assertEqual(len(header), 512)
@@ -58,7 +71,7 @@ class TestHeaderCompliance(unittest.TestCase):
     def test_path_too_long_education(self):
         """Verifica que el error cuando la ruta excede 255 bytes."""
         long_path = "a" * 260
-        entry = self._create_minimal_entry(arc_path=long_path)
+        entry = self._create_minimal_track(arc_path=long_path)
 
         with self.assertRaises(ValueError) as cm:
             entry = TarHeader(entry).build()
@@ -68,7 +81,7 @@ class TestHeaderCompliance(unittest.TestCase):
     def test_username_too_long_education(self):
         """Verifica el diagnóstico cuando el nombre de usuario no cabe (32 bytes)."""
         long_user = "usuario.extremadamente.largo.que.no.cabe.en.tar"
-        entry = self._create_minimal_entry(uname=long_user)
+        entry = self._create_minimal_track(uname=long_user)
 
         with self.assertRaises(ValueError) as cm:
             entry = TarHeader(entry).build()
@@ -78,7 +91,7 @@ class TestHeaderCompliance(unittest.TestCase):
     def test_symlink_target_too_long(self):
         """Verifica el límite de 100 bytes para el destino de symlinks."""
         long_target = "b" * 110
-        entry = self._create_minimal_entry(is_symlink=True, linkname=long_target)
+        entry = self._create_minimal_track(is_symlink=True, linkname=long_target)
 
         with self.assertRaises(ValueError) as cm:
             entry = TarHeader(entry).build()
@@ -90,8 +103,8 @@ class TestHeaderCompliance(unittest.TestCase):
         Prueba reina: Dos entradas idénticas deben generar
         exactamente los mismos bytes de header.
         """
-        e1 = self._create_minimal_entry(size=10**10)  # 10GB
-        e2 = self._create_minimal_entry(size=10**10)
+        e1 = self._create_minimal_track(size=10**10)  # 10GB
+        e2 = self._create_minimal_track(size=10**10)
 
         info1 = tarfile.TarInfo(name=e1.arc_path)
         info1.size = e1.size
@@ -112,7 +125,6 @@ class TestHeaderCompliance(unittest.TestCase):
 
     def test_binary_identity(self):
         """Garantiza que el header es idéntico bit a bit sin importar el entorno, siempre que los datos de entrada sean los mismos."""
-        from tartape.core import TarHeader
 
         params = {
             "arc_path": "test/path/file.txt",
@@ -122,8 +134,8 @@ class TestHeaderCompliance(unittest.TestCase):
             "gname": "root",
         }
 
-        e1 = self._create_minimal_entry(**params)
-        e2 = self._create_minimal_entry(**params)
+        e1 = self._create_minimal_track(**params)
+        e2 = self._create_minimal_track(**params)
 
         h1 = TarHeader(e1).build()
         h2 = TarHeader(e2).build()
@@ -136,7 +148,7 @@ class TestHeaderCompliance(unittest.TestCase):
 
         # Creamos una entrada de 10 GiB
         giant_size = 10 * 1024 * 1024 * 1024
-        entry = self._create_minimal_entry(size=giant_size, arc_path="giant.bin")
+        entry = self._create_minimal_track(size=giant_size, arc_path="giant.bin")
 
         header_bytes = TarHeader(entry).build()
         self.assertEqual(
@@ -172,7 +184,7 @@ class TestHeaderCompliance(unittest.TestCase):
             "gname": "tartape-group",
         }
 
-        entry = self._create_minimal_entry(**params)
+        entry = self._create_minimal_track(**params)
         header_bytes = TarHeader(entry).build()
 
         full_tar = header_bytes + (b"\0" * 1024)

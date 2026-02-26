@@ -29,7 +29,9 @@ class TapeRecorder:
 
         self.exclude = exclude
         self.anonymize = anonymize
-        self.tape_path = tartape_path or self.root_path / ".tartape"
+        self.tape_path = (
+            tartape_path or self.root_path.parent / f"{self.root_path.name}.tartape"
+        )
 
         if self.tape_path.exists():
             raise FileExistsError(f"Ya existe una cinta en: {self.tape_path}")
@@ -52,12 +54,9 @@ class TapeRecorder:
 
     def _finalize_tape(self):
         self.db_session.close()
-        if self.tape_path.exists():
-            self.tape_path.unlink()
-
         shutil.move(str(self._temp_path), str(self.tape_path))
-        logger.info(f"Tape successfully recorded on: {self.tape_path}")
         self._temp_dir.cleanup()
+        logger.info(f"Tape successfully recorded on: {self.tape_path}")
 
     def commit(self) -> str:
         """
@@ -94,7 +93,7 @@ class TapeRecorder:
                 current_offset += total_entry_size
 
                 track.end_offset = current_offset
-                track.save()
+                track.save()  # TODO: move to a buffer.
 
             total_tape_size = current_offset + TAR_FOOTER_SIZE
             fingerprint = self._calculate_fingerprint()
@@ -120,7 +119,6 @@ class TapeRecorder:
             with os.scandir(current_path) as it:
                 for entry in it:
                     entry_path = Path(entry.path)
-
                     if self._should_exclude(entry_path):
                         continue
 

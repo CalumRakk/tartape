@@ -47,9 +47,8 @@ class TarStreamGenerator:
                 last_offset = entry.end_offset
                 continue
 
-            # Start event (only if we are not resuming in the middle of the file)
-            if start_offset <= entry.start_offset:
-                yield self._create_event_start(entry, start_offset)
+            # Always played whenever the stream touches this file.
+            yield self._create_event_start(entry, start_offset)
 
             yield from self._emit_header(entry, start_offset)
 
@@ -197,9 +196,9 @@ class TarStreamGenerator:
         except OSError as e:
             raise TarIntegrityError(f"Archivo inaccesible: {entry.source_path}") from e
 
-        # Mtime Consistency
-        # Using a tiny epsilon for float comparison safety
-        if abs(st.st_mtime - entry.mtime) > 1e-4:
+            # Mtime Consistency
+            # Using a tiny epsilon for float comparison safety
+            # TODO: Make the conversion from mtime to integer more explicit. The logic is repeating itself.        if abs(int(st.st_mtime) - entry.mtime) > 1e-4:
             msg = (
                 f"File modified (mtime) between inventory and stream: "
                 f"'{entry.source_path}'. Aborting."
