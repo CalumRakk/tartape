@@ -4,6 +4,8 @@ from typing import Iterable
 
 import peewee
 
+from tartape.constants import TAPE_DB_NAME, TAPE_METADATA_DIR
+
 from .database import DatabaseSession
 from .models import TapeMetadata, Track
 
@@ -18,8 +20,7 @@ class Tape:
 
     def __init__(self, db_path: str | Path):
         self.path = Path(db_path)
-        self._session = DatabaseSession(self.path)
-        self.db = None
+        self.db = DatabaseSession(self.path)
 
     @classmethod
     def open(cls, path: str | Path) -> "Tape":
@@ -44,11 +45,11 @@ class Tape:
         if not target_dir.is_dir():
             raise NotADirectoryError(f"{directory} is not a valid directory.")
 
-        candidate = target_dir.parent / f"{target_dir.name}.tartape"
+        candidate = target_dir / TAPE_METADATA_DIR / TAPE_DB_NAME
         if candidate.exists() and candidate.is_file():
             return cls(candidate)
 
-        raise FileNotFoundError(f"No tape (.tartape) found in {directory}")
+        raise FileNotFoundError(f"No tape found in: {candidate}")
 
     @property
     def fingerprint(self) -> str:
@@ -67,10 +68,11 @@ class Tape:
 
     def close(self):
         """Close the connection to the tape database."""
-        self._session.close()
+        self.db.close()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
 
     def __enter__(self):
+        self.db.start()
         return self

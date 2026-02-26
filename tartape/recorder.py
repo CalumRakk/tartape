@@ -6,6 +6,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
+from tartape.constants import TAPE_DB_NAME, TAPE_METADATA_DIR
 from tartape.database import DatabaseSession
 from tartape.factory import ExcludeType, TarEntryFactory
 
@@ -29,17 +30,16 @@ class TapeRecorder:
 
         self.exclude = exclude
         self.anonymize = anonymize
-        self.tape_path = (
-            tartape_path or self.root_path.parent / f"{self.root_path.name}.tartape"
-        )
 
-        if self.tape_path.exists():
-            raise FileExistsError(f"Ya existe una cinta en: {self.tape_path}")
+        self.tape_dir = self.root_path / TAPE_METADATA_DIR
+        self.tape_db_path = self.tape_dir / TAPE_DB_NAME
+        if self.tape_db_path.exists():
+            raise FileExistsError(f"Ya existe una cinta en: {self.tape_db_path}")
 
         self._temp_dir = tempfile.TemporaryDirectory()
-        self._temp_path = Path(self._temp_dir.name) / self.tape_path.name
-        self.db_session = DatabaseSession(self._temp_path)
-        self.db = self.db_session.start()
+        self._temp_path = Path(self._temp_dir.name) / self.tape_db_path.name
+        self.temp_tape_db = DatabaseSession(self._temp_path)
+        self.db = self.temp_tape_db.start()
 
         self._buffer = []
         self._batch_size = 300
@@ -53,10 +53,13 @@ class TapeRecorder:
         return sha.hexdigest()
 
     def _finalize_tape(self):
-        self.db_session.close()
-        shutil.move(str(self._temp_path), str(self.tape_path))
+        self.temp_tape_db.close()
+
+        self.tape_dir.mkdir(exist_ok=True)
+
+        shutil.move(str(self._temp_path), str(self.tape_db_path))
         self._temp_dir.cleanup()
-        logger.info(f"Tape successfully recorded on: {self.tape_path}")
+        logger.info(f"Tape successfully recorded on: {self.tape_db_path}")
 
     def commit(self) -> str:
         """
@@ -151,6 +154,9 @@ class TapeRecorder:
 
     def _should_exclude(self, path: Path) -> bool:
         """Determines if a path should be skipped based on the 'self.exclude'."""
+
+        if TAPE_METADATA_DIR in path.parts:
+            return True
         if self.exclude is None:
             return False
         if callable(self.exclude):
@@ -173,4 +179,4 @@ class TapeRecorder:
         self._buffer = []
 
     def close(self):
-        self.db_session.close()
+        self.temp_tape_db.close()

@@ -1,4 +1,5 @@
 import logging
+import os
 from pathlib import Path
 from typing import Generator, cast
 
@@ -38,13 +39,36 @@ class TapePlayer:
         if not status["exists"]:
             raise RuntimeError(f"Integrity FAILED: File missing -> {track.arc_path}")
 
-        if status["mtime"] != track.mtime:
-            raise RuntimeError(f"File modified (mtime): {track.arc_path}")
+        if track.is_dir:
+            # If it's the ROOT (empty rel_path), we ignore mtime
+            if track.rel_path == "" or track.rel_path == ".":
+                return
 
-        if not (track.is_dir or track.is_symlink):
+            if status["mtime"] != track.mtime:
+                raise RuntimeError(
+                    "Integrity FAILED: Subfolder structure modified -> {track.arc_path}."
+                    "New or deleted files were detected."
+                )
+            return
+        else:
+            if track.is_symlink:
+                actual_link = os.readlink(self.source_root / track.rel_path)
+                if actual_link != track.linkname:
+                    raise RuntimeError(
+                        f"Integrity FAILED: The link {track.arc_path} points to another location."
+                    )
+                return
+
+            if status["mtime"] != track.mtime:
+                raise RuntimeError(f"File modified (mtime): {track.arc_path}")
+
             if status["size"] != track.size:
                 raise RuntimeError(
                     f"File size changed: '{track.arc_path}'. Expected {track.size}, found {status['size']}."
+                )
+            if status["mode"] != track.mode:
+                raise RuntimeError(
+                    f"File mode changed: '{track.arc_path}'. Expected {track.mode}, found {status['mode']}."
                 )
 
     def _get_track_status(self, track: Track) -> dict:
@@ -52,7 +76,12 @@ class TapePlayer:
         p = self.source_root / track.rel_path
         try:
             st = p.lstat()
-            return {"size": st.st_size, "mtime": int(st.st_mtime), "exists": True}
+            return {
+                "size": st.st_size,
+                "mtime": int(st.st_mtime),
+                "exists": True,
+                "mode": st.st_mode,
+            }
         except FileNotFoundError:
             return {"size": 0, "mtime": 0, "exists": False}
 
