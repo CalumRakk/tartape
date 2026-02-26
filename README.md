@@ -58,10 +58,10 @@ Because TarTape uses fixed positions, you can resume a multi-terabyte upload if 
 
 ```python
 # If the previous upload failed at exactly 5GB...
-start_offset = 5 * 1024 * 1024 * 1024 
+start_offset = 5 * 1024 * 1024 * 1024
 
 for event in player.play(start_offset=start_offset):
-    # This skips all previous files and starts streaming 
+    # This skips all previous files and starts streaming
     # from the exact byte where the failure occurred.
     upload_to_cloud(event.data)
 ```
@@ -74,7 +74,7 @@ TarTape acts as a "White Box," letting you see exactly which file is being proce
 for event in player.play():
     if event.type == "file_start":
         print(f"Archiving: {event.entry.arc_path} at offset {event.metadata.start_offset}")
-    
+
     elif event.type == "file_end":
         # Each file reports its MD5 hash calculated on-the-fly
         print(f"Done: {event.entry.arc_path} | Hash: {event.metadata.md5sum}")
@@ -96,7 +96,7 @@ TarTape provides full visibility into the streaming process. Every chunk of data
 ## Constraints & Considerations
 
 *   **Path Limit:** Maximum length of **255 characters**. This is a hard limit to ensure stream predictability.
-*   **Anonymization:** User/Group IDs and names are scrubbed by default. This ensures privacy and consistent fingerprints across different environments. 
+*   **Anonymization:** User/Group IDs and names are scrubbed by default. This ensures privacy and consistent fingerprints across different environments.
 *   **Standard Compatibility:** Generated archives are fully compatible with modern TAR tools (`tar`, `7-zip`, etc.).
 *   **Supported Types:** Handles Files, Directories, and Symlinks. Sockets, Pipes, and Devices are ignored.
 *   **Strict Integrity:** Any modification, addition, or deletion of files after the recording phase will invalidate the tape and abort the stream.

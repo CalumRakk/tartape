@@ -1,8 +1,6 @@
 __version__ = "2.0.0b1"
 __copyright__ = "Copyright (C) 2026-present CalumRakk <https://github.com/CalumRakk>"
 
-
-
 from .player import TapePlayer
 from .recorder import TapeRecorder
 from .stream import TarStreamGenerator
