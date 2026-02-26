@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 from typing import Generator, cast
 
+from tartape.factory import TarEntryFactory
 from tartape.schemas import TarEvent
 from tartape.stream import TarStreamGenerator
 from tartape.tape import Tape
@@ -74,11 +75,12 @@ class TapePlayer:
         p = self.source_root / track.rel_path
         try:
             st = p.lstat()
+            file_mode, uid, gid, uname, gname= TarEntryFactory._extract_metadata(st)
             return {
                 "size": st.st_size,
                 "mtime": int(st.st_mtime),
                 "exists": True,
-                "mode": st.st_mode,
+                "mode": file_mode,
             }
         except FileNotFoundError:
             return {"size": 0, "mtime": 0, "exists": False}
