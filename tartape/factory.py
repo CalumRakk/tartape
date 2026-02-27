@@ -2,9 +2,10 @@ import logging
 import os
 import stat as stat_module
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Callable, List, Optional, Union
 
 from tartape.models import Track
+from tartape.schemas import DiskEntryStats
 
 try:
     import grp
@@ -31,6 +32,49 @@ class TarEntryFactory:
     3. Metadata extraction (Users, Groups, Permissions).
     """
 
+    @staticmethod
+    def inspect(path: Path) -> DiskEntryStats:
+        """
+        Single point of file inspection on the system.
+        """
+        try:
+            st = path.lstat()
+
+            # Extract only the permission bits (0o755, 0o644, etc.)
+            permissions = stat_module.S_IMODE(st.st_mode)
+
+            # Identify the object type using the full st_mode
+            is_dir = stat_module.S_ISDIR(st.st_mode)
+            is_file = stat_module.S_ISREG(st.st_mode)
+            is_symlink = stat_module.S_ISLNK(st.st_mode)
+
+            # Securely extract usernames/group names
+            uname, gname = "", ""
+            if pwd:
+                try: uname = pwd.getpwuid(st.st_uid).pw_name # type: ignore
+                except (KeyError, AttributeError): uname = str(st.st_uid)
+            if grp:
+                try: gname = grp.getgrgid(st.st_gid).gr_name # type: ignore
+                except (KeyError, AttributeError): gname = str(st.st_gid)
+
+            return DiskEntryStats(
+                exists=True,
+                size=st.st_size if not is_dir else 0,
+                mtime=int(st.st_mtime),
+                mode=permissions,
+                uid=st.st_uid,
+                gid=st.st_gid,
+                uname=uname,
+                gname=gname,
+                is_dir=is_dir,
+                is_file=is_file,
+                is_symlink=is_symlink,
+                linkname=os.readlink(path) if is_symlink else ""
+            )
+        except (FileNotFoundError, ProcessLookupError):
+            return DiskEntryStats(exists=False)
+
+
     @classmethod
     def create_track(
         cls,
@@ -44,74 +88,30 @@ class TarEntryFactory:
         Returns None if the file is an unsupported type (Socket, Pipe, etc).
         Raises OSError/FileNotFoundError if there are access issues.
         """
-        source_path = Path(source_path)
-        st = source_path.lstat()
-        mode = st.st_mode
-
-        is_dir, is_file, is_symlink = cls._diagnose_type(mode)
-
-        if not (is_dir or is_file or is_symlink):
+        stats = cls.inspect(Path(source_path))
+        if not stats.exists or not (stats.is_dir or stats.is_file or stats.is_symlink):
             return None
 
-        file_mode, uid, gid, uname, gname = cls._extract_metadata(st)
-        if anonymize:
-            uid, gid, uname, gname = 0, 0, "root", "root"
-
         linkname = ""
-        size = st.st_size
+        size = stats.size
 
-        if is_symlink:
+        if stats.is_symlink:
             linkname = os.readlink(source_path)
             size = 0  # In TAR, symlinks have a size of 0
-        elif is_dir:
+        elif stats.is_dir:
             size = 0  # Directories have a size of 0 in the TAR header
 
         return Track(
             arc_path=arcname,
             rel_path=rel_path,
             size=size,
-            mtime=int(st.st_mtime),
-            is_dir=is_dir,
-            is_symlink=is_symlink,
+            mtime=int(stats.mtime),
+            is_dir=stats.is_dir,
+            is_symlink=stats.is_symlink,
             linkname=linkname,
-            mode=file_mode,
-            uid=uid,
-            gid=gid,
-            uname=uname,
-            gname=gname,
+            mode=stats.mode,
+            uid=0 if anonymize else stats.uid,
+            gid=0 if anonymize else stats.gid,
+            uname="root" if anonymize else stats.uname,
+            gname="root" if anonymize else stats.gname,
         )
-
-    @staticmethod
-    def _diagnose_type(mode: int) -> Tuple[bool, bool, bool]:
-        """Returns (is_dir, is_reg, is_symlink) based on the mode."""
-        return (
-            stat_module.S_ISDIR(mode),
-            stat_module.S_ISREG(mode),
-            stat_module.S_ISLNK(mode),
-        )
-
-    @staticmethod
-    def _extract_metadata(st: os.stat_result) -> Tuple[int, int, int, str, str]:
-        """Safely extracts mode, uid, gid, uname, and gname."""
-        # S_IMODE clears type bits (e.g., removes the "I am a directory" bit)
-        # keeping only the permissions (e.g., 0o755).
-        mode = stat_module.S_IMODE(st.st_mode)
-
-        uid = st.st_uid
-        gid = st.st_gid
-        uname = ""
-        gname = ""
-
-        if pwd:
-            try:
-                uname = pwd.getpwuid(uid).pw_name  # type: ignore
-            except (KeyError, AttributeError):
-                uname = str(uid)
-
-        if grp:
-            try:
-                gname = grp.getgrgid(gid).gr_name  # type: ignore
-            except (KeyError, AttributeError):
-                gname = str(gid)
-
-        return mode, uid, gid, uname, gname

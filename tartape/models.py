@@ -84,3 +84,42 @@ class Track(BaseModel):
     def total_block_size(self) -> int:
         content_size = self.size if not (self.is_dir or self.is_symlink) else 0
         return TAR_BLOCK_SIZE + content_size + self.padding_size
+
+
+    def validate_integrity(self, tape_root_directory: Path):
+        """
+        Receive the ROOT of the folder being streamed.
+        Example: Path("/mnt/data")
+
+
+        Strict implementation of ADR-002.
+        Verify that the file on disk matches the inventory.
+        """
+        from tartape.factory import TarEntryFactory
+
+        full_disk_path = tape_root_directory / self.rel_path
+
+        stats = TarEntryFactory.inspect(full_disk_path)
+        if not stats.exists:
+            raise RuntimeError(f"File missing: {self.arc_path}")
+
+
+        if self.is_dir:
+            # ADR-002: Root's mtime is ignored
+            if self.rel_path in ("", "."):
+                return
+            if stats.mtime != self.mtime:
+                raise RuntimeError(f"Directory structure changed: {self.arc_path}")
+            return
+
+        if stats.mtime != self.mtime:
+            raise RuntimeError(f"File modified (mtime): {self.arc_path}")
+
+        if not self.is_symlink:
+            if stats.size != self.size:
+                raise RuntimeError(f"File size changed: {self.arc_path}")
+            if stats.mode != self.mode:
+                raise RuntimeError(f"Permissions changed: {self.arc_path}")
+        else:
+            if stats.linkname != self.linkname:
+                raise RuntimeError(f"Symlink target changed: {self.arc_path}")

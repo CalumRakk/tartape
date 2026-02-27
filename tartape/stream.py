@@ -1,5 +1,6 @@
 import hashlib
 import logging
+from pathlib import Path
 from typing import Generator, Iterable, Optional
 
 from tartape.header import TarHeader
@@ -26,7 +27,8 @@ class TarIntegrityError(Exception):
 
 
 class TarStreamGenerator:
-    def __init__(self, entries: Iterable[Track]):
+    def __init__(self, entries: Iterable[Track], directory: str | Path):
+        self.directory = Path(directory)
         self.entries = entries
 
     def stream(
@@ -110,7 +112,7 @@ class TarStreamGenerator:
         if global_skip >= entry.content_end_offset:
             return None  # Jump drops after content
 
-        self._validate_integrity(entry)
+        entry.validate_integrity(self.directory)
         local_skip = max(0, global_skip - content_start)
         bytes_remaining = entry.size - local_skip
 
@@ -168,31 +170,3 @@ class TarStreamGenerator:
 
         if footer:
             yield TarFileDataEvent(type="file_data", data=footer)
-
-    def _validate_integrity(self, entry: Track):
-        """
-        Strict implementation of ADR-002.
-        Verify that the file on disk matches the inventory.
-        """
-        try:
-            st = entry.source_path.lstat()
-        except OSError as e:
-            raise TarIntegrityError(f"Archivo inaccesible: {entry.source_path}") from e
-
-            # Mtime Consistency
-            # Using a tiny epsilon for float comparison safety
-            # TODO: Make the conversion from mtime to integer more explicit. The logic is repeating itself.        if abs(int(st.st_mtime) - entry.mtime) > 1e-4:
-            msg = (
-                f"File modified (mtime) between inventory and stream: "
-                f"'{entry.source_path}'. Aborting."
-            )
-            logger.error(msg)
-            raise RuntimeError(msg)
-
-        if st.st_size != entry.size:
-            msg = (
-                f"File size changed: '{entry.source_path}'. "
-                f"Expected {entry.size}, found {st.st_size}."
-            )
-            logger.error(msg)
-            raise RuntimeError(msg)

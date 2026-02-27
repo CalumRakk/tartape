@@ -3,6 +3,20 @@ from typing import Literal, Optional, Union
 
 from tartape.models import Track
 
+@dataclass(frozen=True)
+class DiskEntryStats:
+    exists: bool
+    size: int = 0
+    mtime: int = 0
+    mode: int = 0
+    uid: int = 0
+    gid: int = 0
+    uname: str = ""
+    gname: str = ""
+    is_dir: bool = False
+    is_file: bool = False
+    is_symlink: bool = False
+    linkname: str = ""
 
 @dataclass(frozen=True)
 class FileStartMetadata:

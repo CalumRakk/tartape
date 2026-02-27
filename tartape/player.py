@@ -1,9 +1,7 @@
 import logging
-import os
 from pathlib import Path
 from typing import Generator, Iterable, cast
 
-from tartape.factory import TarEntryFactory
 from tartape.schemas import TarEvent
 from tartape.stream import TarStreamGenerator
 from tartape.tape import Tape
@@ -23,67 +21,10 @@ class TapePlayer:
         logger.info("Starting full integrity verification...")
 
         for track in self.tape.get_tracks():
-            self._assert_track_integrity(track)
+            track.validate_integrity(self.directory)
 
         logger.info("Full integrity check PASSED.")
         return True
-
-    def _assert_track_integrity(self, track: Track):
-        """
-        Centralized method for validating a track against the disk.
-        Returns True if valid.
-        """
-        status = self._get_track_status(track)
-
-        if not status["exists"]:
-            raise RuntimeError(f"Integrity FAILED: File missing -> {track.arc_path}")
-
-        if track.is_dir:
-            # If it's the ROOT (empty rel_path), we ignore mtime
-            if track.rel_path == "" or track.rel_path == ".":
-                return
-
-            if status["mtime"] != track.mtime:
-                raise RuntimeError(
-                    "Integrity FAILED: Subfolder structure modified -> {track.arc_path}."
-                    "New or deleted files were detected."
-                )
-            return
-        else:
-            if track.is_symlink:
-                actual_link = os.readlink(self.directory / track.rel_path)
-                if actual_link != track.linkname:
-                    raise RuntimeError(
-                        f"Integrity FAILED: The link {track.arc_path} points to another location."
-                    )
-                return
-
-            if status["mtime"] != track.mtime:
-                raise RuntimeError(f"File modified (mtime): {track.arc_path}")
-
-            if status["size"] != track.size:
-                raise RuntimeError(
-                    f"File size changed: '{track.arc_path}'. Expected {track.size}, found {status['size']}."
-                )
-            if status["mode"] != track.mode:
-                raise RuntimeError(
-                    f"File mode changed: '{track.arc_path}'. Expected {track.mode}, found {status['mode']}."
-                )
-
-    def _get_track_status(self, track: Track) -> dict:
-        """Gets current size and mtime of a track on disk."""
-        p = self.directory / track.rel_path
-        try:
-            st = p.lstat()
-            file_mode, _, _, _, _= TarEntryFactory._extract_metadata(st)
-            return {
-                "size": st.st_size,
-                "mtime": int(st.st_mtime),
-                "exists": True,
-                "mode": file_mode,
-            }
-        except FileNotFoundError:
-            return {"size": 0, "mtime": 0, "exists": False}
 
     def _spot_check(self, sample_size: int = 10):
         """
@@ -103,7 +44,7 @@ class TapePlayer:
         logger.info(f"Performing spot check on {current_sample_size} random files...")
 
         for track in samples:
-            self._assert_track_integrity(track)
+            track.validate_integrity(self.directory)
 
         logger.info("Spot check PASSED.")
 
@@ -134,7 +75,7 @@ class TapePlayer:
                 Track.get((Track.start_offset <= offset) & (Track.end_offset > offset)),
             )
             logger.info(f"Verifying resume point at file: {track.arc_path}")
-            self._assert_track_integrity(track)
+            track.validate_integrity(self.directory)
         except Track.DoesNotExist:  # type: ignore
             raise RuntimeError(
                 f"Critical error: No track found for offset {offset} despite being within bounds."
@@ -170,7 +111,7 @@ class TapePlayer:
                     track.source_path = self.directory
                     yield track
 
-            engine = TarStreamGenerator(track_to_entry_gen())
+            engine = TarStreamGenerator(track_to_entry_gen(), self.directory)
             yield from engine.stream(start_offset=start_offset, chunk_size=chunk_size)
 
     def get_offset_of(self, arc_path: str) -> int:
