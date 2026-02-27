@@ -5,7 +5,7 @@ from typing import Generator, Iterable, Optional
 
 from tartape.header import TarHeader
 
-from .constants import CHUNK_SIZE_DEFAULT, TAR_FOOTER_SIZE
+from .constants import CHUNK_SIZE_DEFAULT, TAR_BLOCK_SIZE, TAR_FOOTER_SIZE
 from .models import Track
 from .schemas import (
     FileEndMetadata,
@@ -95,28 +95,45 @@ class TarStreamGenerator:
     def _emit_header(
         self, entry: Track, global_skip: int
     ) -> Generator[TarEvent, None, None]:
-        if global_skip >= entry.header_end_offset:
-            return
-        local_skip = max(0, global_skip - entry.start_offset)
-        header_bytes = self._build_header(entry)[local_skip:]
+        local_skip, bytes_to_send = self._get_stream_window(
+            global_skip, entry.start_offset, TAR_BLOCK_SIZE
+        )
+        if bytes_to_send > 0:
+            header = self._build_header(entry)[local_skip:]
+            yield TarFileDataEvent(type="file_data", data=header)
 
-        if header_bytes:
-            yield TarFileDataEvent(type="file_data", data=header_bytes)
+    def _get_stream_window(self, global_skip: int, block_start: int, block_length: int) -> tuple[int, int]:
+        """
+        Given a global resume position and a data block,
+        calculate the local offset and how many bytes actually need to be sent.
+
+        Returns: (local_skip, bytes_to_send)
+        """
+        block_end = block_start + block_length
+
+        # Case: The restart point has now passed this entire block
+        if global_skip >= block_end:
+            return 0, 0
+
+        # Case: The block is within or beyond the resume point
+        local_skip = max(0, global_skip - block_start)
+        bytes_to_send = block_length - local_skip
+
+        return local_skip, bytes_to_send
 
     def _stream_file_content_safely(
         self, entry: Track, global_skip: int, chunk_size: int
     ) -> Generator[TarEvent, None, Optional[str]]:
         """Safely stream file content, ensuring that we do not read past the end of the file."""
 
-        content_start = entry.header_end_offset
-        if global_skip >= entry.content_end_offset:
-            return None  # Jump drops after content
+        local_skip, bytes_remaining = self._get_stream_window(
+            global_skip, entry.header_end_offset, entry.size
+        )
+
+        if bytes_remaining <= 0:
+            return None
 
         entry.validate_integrity(self.directory)
-        local_skip = max(0, global_skip - content_start)
-        bytes_remaining = entry.size - local_skip
-
-        # Only calculate MD5 if we are reading the file from the beginning
         md5 = hashlib.md5() if local_skip == 0 else None
 
         try:
@@ -127,18 +144,14 @@ class TarStreamGenerator:
                 while bytes_remaining > 0:
                     read_size = min(chunk_size, bytes_remaining)
                     chunk = f.read(read_size)
+                    if not chunk: raise RuntimeError(f"File shrunk: '{entry.source_path}'")
 
-                    if not chunk:
-                        raise RuntimeError(f"File shrunk: '{entry.source_path}'")
-
-                    if md5:
-                        md5.update(chunk)
-
+                    if md5: md5.update(chunk)
                     bytes_remaining -= len(chunk)
                     yield TarFileDataEvent(type="file_data", data=chunk)
 
-                if local_skip == 0 and f.read(1):
-                    raise RuntimeError(f"File grew: '{entry.source_path}'")
+                    if local_skip == 0 and f.read(1):
+                        raise RuntimeError(f"File grew: '{entry.source_path}'")
 
         except OSError as e:
             raise TarIntegrityError(f"Error leyendo {entry.source_path}") from e
@@ -149,24 +162,20 @@ class TarStreamGenerator:
         self, entry: Track, global_skip: int
     ) -> Generator[TarEvent, None, None]:
         # Padding starts where the data ends and ends at end_offset
-        if global_skip >= entry.end_offset or entry.content_end_offset == entry.end_offset:
-            return
-        local_skip = max(0, global_skip - entry.content_end_offset)
-        padding_to_send = (entry.end_offset - entry.content_end_offset) - local_skip
+        padding_total = entry.end_offset - entry.content_end_offset
 
-        if padding_to_send > 0:
-            yield TarFileDataEvent(type="file_data", data=b"\0" * padding_to_send)
+        _, bytes_to_send = self._get_stream_window(
+            global_skip, entry.content_end_offset, padding_total
+        )
+        if bytes_to_send > 0:
+            yield TarFileDataEvent(type="file_data", data=b"\0" * bytes_to_send)
 
     def _emit_tape_footer(
         self, global_skip: int, footer_start: int
     ) -> Generator[TarEvent, None, None]:
-        footer_end = footer_start + TAR_FOOTER_SIZE
+        _, bytes_to_send = self._get_stream_window(
+            global_skip, footer_start, TAR_FOOTER_SIZE
+        )
 
-        if global_skip >= footer_end:
-            return
-
-        local_skip = max(0, global_skip - footer_start)
-        footer = b"\0" * (TAR_FOOTER_SIZE - local_skip)
-
-        if footer:
-            yield TarFileDataEvent(type="file_data", data=footer)
+        if bytes_to_send > 0:
+            yield TarFileDataEvent(type="file_data", data=b"\0" * bytes_to_send)
