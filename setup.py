@@ -31,7 +31,7 @@ setuptools.setup(
     packages=setuptools.find_packages(),
     python_requires=">=3.10.0",
     install_requires=[
-        "peewee==4.0.0",
+        "peewee>=3.18.0",
     ],
     keywords="tar, streaming, deterministic, resumable, cloud-backup, storage",
 )

@@ -39,7 +39,7 @@ class TapeRecorder:
         self._temp_dir = tempfile.TemporaryDirectory()
         self._temp_path = Path(self._temp_dir.name) / self.tape_db_path.name
         self.temp_tape_db = DatabaseSession(self._temp_path)
-        self.db = self.temp_tape_db.start()
+        self.db = self.temp_tape_db.connect()
 
         self._buffer = []
         self._batch_size = 300
@@ -53,9 +53,7 @@ class TapeRecorder:
         return sha.hexdigest()
 
     def _finalize_tape(self):
-        self.temp_tape_db.close()
-
-        self.tape_dir.mkdir(exist_ok=True, parents=True,)
+        self.tape_dir.mkdir(exist_ok=True, parents=True)
 
         shutil.move(str(self._temp_path), str(self.tape_db_path))
         self._temp_dir.cleanup()
@@ -93,6 +91,7 @@ class TapeRecorder:
                 key="total_size", value=str(total_tape_size)
             ).on_conflict_replace().execute()
 
+        self.temp_tape_db.close()
         self._finalize_tape()
         return fingerprint
 
@@ -103,20 +102,29 @@ class TapeRecorder:
         self._recursive_scan(self.directory, prefix)
 
     def _recursive_scan(self, current_path: Path, arc_prefix: str):
-        try:
-            with os.scandir(current_path) as it:
-                for entry in it:
-                    entry_path = Path(entry.path)
-                    if self._should_exclude(entry_path):
-                        continue
+        stack = [(self.directory, self.directory.name)]
+        self._add_to_buffer(self.directory, arcname=self.directory.name)
 
-                    entry_arcname = f"{arc_prefix}/{entry.name}"
-                    self._add_to_buffer(entry_path, arcname=entry_arcname)
+        while stack:
+            current_path, arc_prefix = stack.pop()
 
-                    if entry.is_dir() and not entry.is_symlink():
-                        self._recursive_scan(entry_path, entry_arcname)
-        except PermissionError:
-            logger.warning(f"Permission denied: {current_path}")
+            try:
+                with os.scandir(current_path) as it:
+                    for entry in it:
+                        entry_path = Path(entry.path)
+
+                        if self._should_exclude(entry_path):
+                            continue
+
+                        entry_arcname = f"{arc_prefix}/{entry.name}"
+                        self._add_to_buffer(entry_path, arcname=entry_arcname)
+
+                        if entry.is_dir() and not entry.is_symlink():
+                            stack.append((entry_path, entry_arcname))
+            except PermissionError:
+                logger.warning(f"Permission denied: {current_path}")
+            except Exception as e:
+                logger.error(f"Error scanning {current_path}: {e}")
 
     def _add_to_buffer(self, source_path: Path, arcname: str):
         """Parses a file and adds it to the insert buffer."""

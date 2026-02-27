@@ -11,45 +11,32 @@ class DatabaseSession:
 
     def __init__(self, db_path: Union[Union[str, Path], Literal[":memory:"]]):
         self.db_path = Path(db_path) if db_path != ":memory:" else db_path
-        self.db = None
-
-    def __enter__(self):
-        if db_proxy.obj is not None:
-            current_db_path = getattr(db_proxy.obj, "database", None)
-            if current_db_path == str(self.db_path) and not db_proxy.is_closed():
-                return db_proxy
-
-            if not db_proxy.obj.is_closed():
-                db_proxy.obj.close()
-
-        if isinstance(self.db_path, Path):
-            self.db_path.parent.mkdir(parents=True, exist_ok=True)
-
         self.db = peewee.SqliteDatabase(
             str(self.db_path),
-            pragmas={"journal_mode": "wal", "cache_size": -1024 * 64},
+            pragmas={
+                "journal_mode": "wal",
+                "cache_size": -1024 * 64,      # 64MB cache
+                "foreign_keys": 1,
+                "synchronous": "NORMAL",
+            },
             timeout=10,
         )
+        from tartape.models import Track, TapeMetadata
+        self._models = [Track, TapeMetadata]
+        # 'bind' Ignore what your Meta.database (the proxy) says and use ME directly
+        self.db.bind(self._models, bind_refs=True, bind_backrefs=True)
 
-        db_proxy.initialize(self.db)
-        self.db.connect()
-
-        from tartape.models import TapeMetadata, Track
-
-        db_proxy.create_tables(
-            [Track, TapeMetadata],
-            safe=True,
-        )
+    def __enter__(self):
+        if self.db.is_closed():
+            self.db.connect()
+        self.db.create_tables(self._models, safe=True)
         return self.db
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.db and not self.db.is_closed():
+        if not self.db.is_closed():
             self.db.close()
 
-        if db_proxy.obj and not db_proxy.obj.is_closed():
-            db_proxy.obj.close()
-
-    def start(self):
+    def connect(self):
         return self.__enter__()
 
     def close(self):

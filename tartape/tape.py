@@ -74,5 +74,5 @@ class Tape:
         self.close()
 
     def __enter__(self):
-        self.db.start()
+        self.db.connect()
         return self

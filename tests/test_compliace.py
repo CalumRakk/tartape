@@ -16,7 +16,7 @@ class TestHeaderCompliance(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.db_session = DatabaseSession(":memory:")
-        cls.db = cls.db_session.start()
+        cls.db = cls.db_session.connect()
 
     @classmethod
     def tearDownClass(cls):
