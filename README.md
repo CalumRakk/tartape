@@ -43,7 +43,7 @@ from tartape import Tape, TapePlayer
 
 # Discover the tape and start the player
 tape = Tape.discover("./massive_dataset")
-player = TapePlayer(tape, source_root="./massive_dataset")
+player = TapePlayer(tape, directory="./massive_dataset")
 
 with open("backup.tar", "wb") as f:
     # Every event contains data chunks or metadata

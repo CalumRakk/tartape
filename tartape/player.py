@@ -1,7 +1,7 @@
 import logging
 import os
 from pathlib import Path
-from typing import Generator, cast
+from typing import Generator, Iterable, cast
 
 from tartape.factory import TarEntryFactory
 from tartape.schemas import TarEvent
@@ -14,9 +14,9 @@ logger = logging.getLogger(__name__)
 
 
 class TapePlayer:
-    def __init__(self, tape: Tape, source_root: str | Path):
+    def __init__(self, tape: Tape, directory: str | Path):
         self.tape = tape
-        self.source_root = Path(source_root).absolute()
+        self.directory = Path(directory).absolute()
 
     def _verify(self) -> bool:
         """Compare the signature recorded (saved) on the tape with that of the current disk."""
@@ -51,7 +51,7 @@ class TapePlayer:
             return
         else:
             if track.is_symlink:
-                actual_link = os.readlink(self.source_root / track.rel_path)
+                actual_link = os.readlink(self.directory / track.rel_path)
                 if actual_link != track.linkname:
                     raise RuntimeError(
                         f"Integrity FAILED: The link {track.arc_path} points to another location."
@@ -72,10 +72,10 @@ class TapePlayer:
 
     def _get_track_status(self, track: Track) -> dict:
         """Gets current size and mtime of a track on disk."""
-        p = self.source_root / track.rel_path
+        p = self.directory / track.rel_path
         try:
             st = p.lstat()
-            file_mode, uid, gid, uname, gname= TarEntryFactory._extract_metadata(st)
+            file_mode, _, _, _, _= TarEntryFactory._extract_metadata(st)
             return {
                 "size": st.st_size,
                 "mtime": int(st.st_mtime),
@@ -148,29 +148,30 @@ class TapePlayer:
     ) -> Generator[TarEvent, None, None]:
         logger.debug("Starting tape playback...")
 
-        if fast_verify:
-            self._spot_check(sample_size=15)
-        else:
-            self._verify()
+        with self.tape:
+            if fast_verify:
+                self._spot_check(sample_size=15)
+            else:
+                self._verify()
 
-        if start_offset > 0:
-            logger.info(f"Resuming stream from offset: {start_offset} bytes")
-            self._verify_resume_point(start_offset)
+            if start_offset > 0:
+                logger.info(f"Resuming stream from offset: {start_offset} bytes")
+                self._verify_resume_point(start_offset)
 
-        # Find those whose 'end_offset' is greater than our starting point
-        query = (
-            Track.select()
-            .where(Track.end_offset > start_offset)
-            .order_by(Track.arc_path)
-        )
+            # Find those whose 'end_offset' is greater than our starting point
+            query = cast(Iterable[Track],
+                Track.select()
+                .where(Track.end_offset > start_offset)
+                .order_by(Track.arc_path)
+            )
 
-        def track_to_entry_gen():
-            for track in query:
-                track._source_root = self.source_root
-                yield track
+            def track_to_entry_gen():
+                for track in query:
+                    track.source_path = self.directory
+                    yield track
 
-        engine = TarStreamGenerator(track_to_entry_gen())
-        yield from engine.stream(start_offset=start_offset, chunk_size=chunk_size)
+            engine = TarStreamGenerator(track_to_entry_gen())
+            yield from engine.stream(start_offset=start_offset, chunk_size=chunk_size)
 
     def get_offset_of(self, arc_path: str) -> int:
         track = Track.get(Track.arc_path == arc_path)

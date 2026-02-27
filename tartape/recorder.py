@@ -19,19 +19,19 @@ logger = logging.getLogger(__name__)
 class TapeRecorder:
     def __init__(
         self,
-        root_path: str | Path,
+        directory: str | Path,
         tartape_path: Optional[Path] = None,
         exclude: Optional[ExcludeType] = None,
         anonymize: bool = True,
     ):
-        self.root_path = Path(root_path).absolute()
-        if not self.root_path.is_dir():
-            raise ValueError(f"La ruta raíz '{root_path}' debe ser un directorio.")
+        self.directory = Path(directory).absolute()
+        if not self.directory.is_dir():
+            raise ValueError(f"The root path '{directory}' must be a directory.")
 
         self.exclude = exclude
         self.anonymize = anonymize
 
-        self.tape_dir = self.root_path / TAPE_METADATA_DIR
+        self.tape_dir = self.directory / TAPE_METADATA_DIR
         self.tape_db_path = self.tape_dir / TAPE_DB_NAME
         if self.tape_db_path.exists():
             raise FileExistsError(f"Ya existe una cinta en: {self.tape_db_path}")
@@ -55,7 +55,7 @@ class TapeRecorder:
     def _finalize_tape(self):
         self.temp_tape_db.close()
 
-        self.tape_dir.mkdir(exist_ok=True)
+        self.tape_dir.mkdir(exist_ok=True, parents=True,)
 
         shutil.move(str(self._temp_path), str(self.tape_db_path))
         self._temp_dir.cleanup()
@@ -112,10 +112,10 @@ class TapeRecorder:
         return fingerprint
 
     def _scan_root(self):
-        prefix = self.root_path.name
-        self._add_to_buffer(self.root_path, arcname=prefix)
+        prefix = self.directory.name
+        self._add_to_buffer(self.directory, arcname=prefix)
 
-        self._recursive_scan(self.root_path, prefix)
+        self._recursive_scan(self.directory, prefix)
 
     def _recursive_scan(self, current_path: Path, arc_prefix: str):
         try:
@@ -136,7 +136,7 @@ class TapeRecorder:
     def _add_to_buffer(self, source_path: Path, arcname: str):
         """Parses a file and adds it to the insert buffer."""
 
-        rel_path = str(source_path.relative_to(self.root_path))
+        rel_path = str(source_path.relative_to(self.directory))
         if rel_path == ".":
             rel_path = ""
 
@@ -146,7 +146,7 @@ class TapeRecorder:
 
         if track:
             # We establish the root so that the factory can work with relative paths
-            track._source_root = self.root_path
+            track._source_root = self.directory
             self._buffer.append(track)
 
             if len(self._buffer) >= self._batch_size:

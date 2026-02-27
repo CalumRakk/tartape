@@ -45,7 +45,7 @@ class TestTarIntegrity(unittest.TestCase):
         with Tape.discover(self.base_path) as tape:
             self.assertGreater(tape.total_size, 0)
 
-            player = TapePlayer(tape, source_root=self.base_path)
+            player = TapePlayer(tape, directory=self.base_path)
 
             buffer = io.BytesIO()
             for event in player.play(fast_verify=False):
@@ -73,7 +73,7 @@ class TestTarIntegrity(unittest.TestCase):
         f.write_text("contenido mucho mas largo")
 
         with Tape.discover(self.base_path) as tape:
-            player = TapePlayer(tape, source_root=self.base_path)
+            player = TapePlayer(tape, directory=self.base_path)
 
             with self.assertRaisesRegex(RuntimeError, "File size changed"):
                 for _ in player.play(fast_verify=False):
@@ -91,7 +91,7 @@ class TestTarIntegrity(unittest.TestCase):
         os.utime(f, (future_time, future_time))
 
         with Tape.discover(self.base_path) as tape:
-            player = TapePlayer(tape, source_root=self.base_path)
+            player = TapePlayer(tape, directory=self.base_path)
 
             with self.assertRaisesRegex(RuntimeError, "File modified"):
                 for _ in player.play(fast_verify=False):
@@ -116,7 +116,7 @@ class TestTarIntegrity(unittest.TestCase):
             target_track = tracks[2]
             start_at = target_track.start_offset
 
-            player = TapePlayer(tape, source_root=self.base_path)
+            player = TapePlayer(tape, directory=self.base_path)
 
             buffer = io.BytesIO()
             for event in player.play(start_offset=start_at, fast_verify=False):
