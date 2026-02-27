@@ -4,7 +4,7 @@ from typing import Generator, Iterable, Optional
 
 from tartape.header import TarHeader
 
-from .constants import CHUNK_SIZE_DEFAULT, TAR_BLOCK_SIZE, TAR_FOOTER_SIZE
+from .constants import CHUNK_SIZE_DEFAULT, TAR_FOOTER_SIZE
 from .models import Track
 from .schemas import (
     FileEndMetadata,
@@ -53,7 +53,7 @@ class TarStreamGenerator:
             yield from self._emit_header(entry, start_offset)
 
             md5_hash: Optional[str] = None
-            if self._entry_has_content(entry):
+            if entry.has_content:
                 md5_hash = yield from self._stream_file_content_safely(
                     entry, start_offset, effective_chunk_size
                 )
@@ -90,21 +90,12 @@ class TarStreamGenerator:
             ),
         )
 
-    def _entry_has_content(self, entry: Track) -> bool:
-        return not entry.is_dir and not entry.is_symlink
-
     def _emit_header(
         self, entry: Track, global_skip: int
     ) -> Generator[TarEvent, None, None]:
-        assert entry.start_offset is not None
-
-        header_start = entry.start_offset
-        header_end = header_start + TAR_BLOCK_SIZE
-
-        if global_skip >= header_end:
-            return  # The jump falls later, ignore header
-
-        local_skip = max(0, global_skip - header_start)
+        if global_skip >= entry.header_end_offset:
+            return
+        local_skip = max(0, global_skip - entry.start_offset)
         header_bytes = self._build_header(entry)[local_skip:]
 
         if header_bytes:
@@ -115,14 +106,11 @@ class TarStreamGenerator:
     ) -> Generator[TarEvent, None, Optional[str]]:
         """Safely stream file content, ensuring that we do not read past the end of the file."""
 
-        content_start = entry.start_offset + TAR_BLOCK_SIZE
-        content_end = content_start + entry.size
-
-        if global_skip >= content_end:
+        content_start = entry.header_end_offset
+        if global_skip >= entry.content_end_offset:
             return None  # Jump drops after content
 
         self._validate_integrity(entry)
-
         local_skip = max(0, global_skip - content_start)
         bytes_remaining = entry.size - local_skip
 
@@ -158,19 +146,14 @@ class TarStreamGenerator:
     def _emit_padding(
         self, entry: Track, global_skip: int
     ) -> Generator[TarEvent, None, None]:
+        # Padding starts where the data ends and ends at end_offset
+        if global_skip >= entry.end_offset or entry.content_end_offset == entry.end_offset:
+            return
+        local_skip = max(0, global_skip - entry.content_end_offset)
+        padding_to_send = (entry.end_offset - entry.content_end_offset) - local_skip
 
-        content_end = entry.start_offset + TAR_BLOCK_SIZE + entry.size
-        padding_end = entry.end_offset
-
-        if global_skip >= padding_end or content_end == padding_end:
-            return  # There is no padding or the jump falls later
-
-        local_skip = max(0, global_skip - content_end)
-        padding_size = padding_end - content_end
-        padding_bytes = b"\0" * (padding_size - local_skip)
-
-        if padding_bytes:
-            yield TarFileDataEvent(type="file_data", data=padding_bytes)
+        if padding_to_send > 0:
+            yield TarFileDataEvent(type="file_data", data=b"\0" * padding_to_send)
 
     def _emit_tape_footer(
         self, global_skip: int, footer_start: int

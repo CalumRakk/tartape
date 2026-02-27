@@ -4,13 +4,13 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional, cast
 
 from tartape.constants import TAPE_DB_NAME, TAPE_METADATA_DIR
 from tartape.database import DatabaseSession
 from tartape.factory import ExcludeType, TarEntryFactory
 
-from .constants import TAR_BLOCK_SIZE, TAR_FOOTER_SIZE
+from .constants import TAR_FOOTER_SIZE
 from .models import TapeMetadata, Track
 
 logger = logging.getLogger(__name__)
@@ -74,27 +74,12 @@ class TapeRecorder:
 
         with self.db.atomic():
             # Important for deterministic ordering
-            tracks = Track.select().order_by(Track.arc_path)
+            tracks = cast(Iterable[Track], Track.select().order_by(Track.arc_path))
+            current_offset = 0
 
             for track in tracks:
                 track.start_offset = current_offset
-
-                # Header 512
-                header_size = TAR_BLOCK_SIZE
-
-                # + Content (regular files only)
-                content_size = (
-                    track.size if not (track.is_dir or track.is_symlink) else 0
-                )
-
-                # + Padding 512
-                padding = (
-                    TAR_BLOCK_SIZE - (content_size % TAR_BLOCK_SIZE)
-                ) % TAR_BLOCK_SIZE
-
-                total_entry_size = header_size + content_size + padding
-                current_offset += total_entry_size
-
+                current_offset += track.total_block_size
                 track.end_offset = current_offset
                 track.save()  # TODO: move to a buffer.
 
