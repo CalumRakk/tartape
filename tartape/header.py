@@ -24,40 +24,56 @@ class TarHeader:
 
     def _split_path(self, path: str) -> tuple[str, str]:
         """
-        Splits a path to ensure USTAR compatibility.
-        Limits: Name (100 bytes), Prefix (155 bytes).
+        Splits a path into (name, prefix) following USTAR (POSIX.1-1988)
+        and TarTape's Strict Component Integrity (ADR-005).
         """
-        LIMIT_NAME_BYTES = 100
-        LIMIT_PREFIX_BYTES = 155
-        SEPARATOR = "/"
 
         path_bytes = path.encode("utf-8")
-        if len(path_bytes) <= LIMIT_NAME_BYTES:
+
+        if len(path_bytes) > 255:
+            raise ValueError(
+                f"Path is too long ({len(path_bytes)} bytes). "
+                f"USTAR standard limit is 255 bytes."
+            )
+
+        components = path.split("/")
+        for component in components:
+            if len(component.encode("utf-8")) > 100:
+                raise ValueError(
+                    f"ADR-005 Violation: Path component '{component}' is too long "
+                    f"({len(component.encode('utf-8'))} bytes). "
+                    f"Max allowed per component is 100 bytes to ensure metadata integrity."
+                )
+
+        if len(path_bytes) <= 100:
             return path, ""
 
         # Find a '/' such that:
         # - Left part (prefix) <= 155 bytes
         # - Right part (name) <= 100 bytes
-        best_split_index = -1
-        path_length = len(path)
+        best_prefix, best_name = None, None
 
-        for i in range(path_length):
-            if path[i] == SEPARATOR:
-                candidate_prefix = path[0:i]
-                candidate_name = path[i + 1 :]
+        for i, char in enumerate(path):
+            if char == "/":
+                prefix = path[:i]
+                name = path[i + 1 :]
+                if not name:
+                    # USTAR Rule: The name cannot be empty after the cut
+                    continue
+                prefix_bytes = prefix.encode("utf-8")
+                name_bytes = name.encode("utf-8")
+                if len(prefix_bytes) <= 155 and len(name_bytes) <= 100:
+                    # This cut is valid, we're still looking for another one further to the right
+                    best_prefix, best_name = prefix, name
 
-                prefix_size = len(candidate_prefix.encode("utf-8"))
-                name_size = len(candidate_name.encode("utf-8"))
-
-                if prefix_size <= LIMIT_PREFIX_BYTES and name_size <= LIMIT_NAME_BYTES:
-                    best_split_index = i
-
-        if best_split_index == -1:
+        if best_name is None or best_prefix is None:
+            # With the component size limit checked, it's theoretically impossible to reach this point. It's included just in case.
             raise ValueError(
-                f"Path is too long or cannot be split to fit USTAR limits: '{path}'"
+                f"Path '{path}' cannot be split into USTAR prefix/name. "
+                f"Check that directory names are not preventing a valid split at a '/'."
             )
 
-        return path[best_split_index + 1 :], path[0:best_split_index]
+        return best_name, best_prefix
 
     def set_size(self, size: int):
         """
@@ -161,7 +177,7 @@ class TarHeader:
         if self.entry.is_dir and not full_arcpath.endswith("/"):
             full_arcpath += "/"
 
-        name, prefix = self._split_path(self.entry.arc_path)
+        name, prefix = self._split_path(full_arcpath)
 
         self.set_string(0, 100, name)
         # Prefix allows full path to reach 255 chars (155 prefix + 100 name)

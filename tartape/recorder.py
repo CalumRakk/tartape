@@ -123,8 +123,7 @@ class TapeRecorder:
                             stack.append((entry_path, entry_arcname))
             except PermissionError:
                 logger.warning(f"Permission denied: {current_path}")
-            except Exception as e:
-                logger.error(f"Error scanning {current_path}: {e}")
+
 
     def _add_to_buffer(self, source_path: Path, arcname: str):
         """Parses a file and adds it to the insert buffer."""

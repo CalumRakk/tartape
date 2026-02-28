@@ -92,6 +92,10 @@ class TarEntryFactory:
         if not stats.exists or not (stats.is_dir or stats.is_file or stats.is_symlink):
             return None
 
+        from tartape.header import TarHeader
+        temp_track = Track(arc_path=arcname)
+        TarHeader(temp_track)._split_path(arcname)
+
         linkname = ""
         size = stats.size
 
