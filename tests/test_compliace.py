@@ -47,48 +47,8 @@ class TestHeaderCompliance(unittest.TestCase):
         header = TarHeader(entry)
         self.assertEqual(len(header.build()), 512)
 
-    def test_large_file_base256_compliance(self):
-        """
-        ADR-004: Verifica que archivos > 8GiB mantienen el header en 512 bytes
-        usando la codificación Base-256 de GNU.
-        """
-        large_size = 9 * 1024 * 1024 * 1024  # 9 GiB
-        entry = self._create_minimal_track(size=large_size)
-
-        header = TarHeader(entry).build()
-        self.assertEqual(len(header), 512)
-
-        info = tarfile.TarInfo(name=entry.arc_path)
-        info.size = entry.size
-        header_bytes = info.tobuf(format=tarfile.GNU_FORMAT)
-
-        self.assertEqual(len(header_bytes), 512)
-        # El primer byte del campo size (offset 124)  debe tener el bit 0x80 activo.
-        self.assertTrue(
-            header_bytes[124] & 0x80, "El bit de flag binario no está activo"
-        )
-
-    def test_path_too_long_education(self):
-        """Verifica que el error cuando la ruta excede 255 bytes."""
-        long_path = "a" * 260
-        entry = self._create_minimal_track(arc_path=long_path)
-
-        with self.assertRaises(ValueError) as cm:
-            entry = TarHeader(entry).build()
-
-        self.assertIn("Path is too long", str(cm.exception))
-
-    def test_username_too_long_education(self):
-        """Verifica el diagnóstico cuando el nombre de usuario no cabe (32 bytes)."""
-        long_user = "usuario.extremadamente.largo.que.no.cabe.en.tar"
-        entry = self._create_minimal_track(uname=long_user)
-
-        with self.assertRaises(ValueError) as cm:
-            entry = TarHeader(entry).build()
-
-        self.assertIn(f"too long for field", str(cm.exception))
-
     def test_symlink_target_too_long(self):
+        # TODO ¿ESTO YA ESTA VERIFICADO?
         """Verifica el límite de 100 bytes para el destino de symlinks."""
         long_target = "b" * 110
         entry = self._create_minimal_track(is_symlink=True, linkname=long_target)

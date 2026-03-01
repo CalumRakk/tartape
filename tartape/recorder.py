@@ -144,7 +144,7 @@ class TapeRecorder:
     def _add_to_buffer(self, source_path: Path, arcname: str):
         """Parses a file and adds it to the insert buffer."""
 
-        rel_path = str(source_path.relative_to(self.directory))
+        rel_path = source_path.relative_to(self.directory).as_posix()
         if rel_path == ".":
             rel_path = ""
 
