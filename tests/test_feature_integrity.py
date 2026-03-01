@@ -56,3 +56,18 @@ class TestIntegritySafeguards(TarTapeTestCase):
         with self.assertRaisesRegex(RuntimeError, "File size changed"):
             for _ in TapePlayer(tape, self.data_dir).play(fast_verify=False):
                 pass
+
+    def test_identity_anonymization(self):
+        """ADR-003: Verifica que por defecto se anonimicen UID/GID y nombres."""
+        self.create_file("secret.txt")
+
+        recorder = TapeRecorder(self.data_dir, anonymize=True)
+        recorder.commit()
+
+        with Tape.discover(self.data_dir) as tape:
+            track = list(tape.get_tracks())[1]
+
+            self.assertEqual(track.uid, 0)
+            self.assertEqual(track.uname, "root")
+            self.assertEqual(track.gid, 0)
+            self.assertEqual(track.gname, "root")

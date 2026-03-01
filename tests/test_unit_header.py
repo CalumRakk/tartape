@@ -1,49 +1,17 @@
 import io
 import tarfile
-import unittest
 from typing import cast
 
-from tartape.database import DatabaseSession
 from tartape.header import TarHeader
 from tartape.models import Track
+from tests.base import TarTapeTestCase
 
 
-class TestHeaderCompliance(unittest.TestCase):
-    """
-    Pruebas quirúrgicas para el contrato de 512 bytes y ADR-004.
-    """
-
-    @classmethod
-    def setUpClass(cls):
-        cls.db_session = DatabaseSession(":memory:")
-        cls.db = cls.db_session.connect()
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.db_session.close()
-
-    def _create_minimal_track(self, **kwargs) -> Track:
-        """Helper para crear una instancia de Track válida para pruebas de header."""
-        defaults = {
-            "arc_path": "file.txt",
-            "rel_path": "path/to/file.txt",
-            "size": 100,
-            "mtime": 1700000000,
-            "mode": 0o644,
-            "uid": 0,
-            "gid": 0,
-            "uname": "root",
-            "gname": "root",
-            "is_dir": False,
-            "is_symlink": False,
-            "linkname": "",
-        }
-        defaults.update(kwargs)
-        return Track(**defaults)
+class TestHeader(TarTapeTestCase):
 
     def test_standard_header_size(self):
         """Verifica que un archivo normal genera exactamente 512 bytes."""
-        entry = self._create_minimal_track()
+        entry = self.create_minimal_track()
         header = TarHeader(entry)
         self.assertEqual(len(header.build()), 512)
 
@@ -51,7 +19,7 @@ class TestHeaderCompliance(unittest.TestCase):
         # TODO ¿ESTO YA ESTA VERIFICADO?
         """Verifica el límite de 100 bytes para el destino de symlinks."""
         long_target = "b" * 110
-        entry = self._create_minimal_track(is_symlink=True, linkname=long_target)
+        entry = self.create_minimal_track(is_symlink=True, linkname=long_target)
 
         with self.assertRaises(ValueError) as cm:
             entry = TarHeader(entry).build()
@@ -63,8 +31,8 @@ class TestHeaderCompliance(unittest.TestCase):
         Prueba reina: Dos entradas idénticas deben generar
         exactamente los mismos bytes de header.
         """
-        e1 = self._create_minimal_track(size=10**10)  # 10GB
-        e2 = self._create_minimal_track(size=10**10)
+        e1 = self.create_minimal_track(size=10**10)  # 10GB
+        e2 = self.create_minimal_track(size=10**10)
 
         info1 = tarfile.TarInfo(name=e1.arc_path)
         info1.size = e1.size
@@ -94,8 +62,8 @@ class TestHeaderCompliance(unittest.TestCase):
             "gname": "root",
         }
 
-        e1 = self._create_minimal_track(**params)
-        e2 = self._create_minimal_track(**params)
+        e1 = self.create_minimal_track(**params)
+        e2 = self.create_minimal_track(**params)
 
         h1 = TarHeader(e1).build()
         h2 = TarHeader(e2).build()
@@ -108,7 +76,7 @@ class TestHeaderCompliance(unittest.TestCase):
 
         # Creamos una entrada de 10 GiB
         giant_size = 10 * 1024 * 1024 * 1024
-        entry = self._create_minimal_track(size=giant_size, arc_path="giant.bin")
+        entry = self.create_minimal_track(size=giant_size, arc_path="giant.bin")
 
         header_bytes = TarHeader(entry).build()
         self.assertEqual(
@@ -144,7 +112,7 @@ class TestHeaderCompliance(unittest.TestCase):
             "gname": "tartape-group",
         }
 
-        entry = self._create_minimal_track(**params)
+        entry = self.create_minimal_track(**params)
         header_bytes = TarHeader(entry).build()
 
         full_tar = header_bytes + (b"\0" * 1024)
@@ -164,6 +132,30 @@ class TestHeaderCompliance(unittest.TestCase):
 
             self.assertTrue(member.chksum > 0)
 
+    def test_large_file_base256(self):
+        """Verifica que archivos > 8GiB mantienen el bloque de 512 bytes (GNU extension)."""
+        giant_size = 10 * 1024 * 1024 * 1024
+        track = Track(
+            arc_path="giant.bin",
+            size=giant_size,
+            mtime=123,
+            mode=0o644,
+            uname="root",
+            gname="root",
+            uid=0,
+            gid=0,
+        )
 
-if __name__ == "__main__":
-    unittest.main()
+        header = TarHeader(track).build()
+
+        self.assertEqual(len(header), 512, "El bloque de header debe ser de 512 bytes")
+        self.assertEqual(header[124], 0x80, "Debe tener el flag binario Base-256")
+
+    def test_header_symlink_target_limit(self):
+        """TAR Standard: El destino de un symlink (linkname) no puede exceder 100 bytes."""
+        # 101 bytes de destino
+        long_target = "a" * 101
+        entry = self.create_minimal_track(is_symlink=True, linkname=long_target)
+
+        with self.assertRaisesRegex(ValueError, "too long for field"):
+            TarHeader(entry).build()

@@ -1,5 +1,7 @@
 import io
+import os
 import tarfile
+import time
 
 from tartape.models import Track
 from tartape.player import TapePlayer
@@ -55,6 +57,7 @@ class TestStreamingEngine(TarTapeTestCase):
             resumed_bytes = resumed_buffer.getvalue()
 
             # --- VALIDACIÓN MAESTRA ---
+
             # El stream reanudado debe ser EXACTAMENTE igual al recorte del original
             expected_suffix = full_bytes[resume_offset:]
 
@@ -74,7 +77,7 @@ class TestStreamingEngine(TarTapeTestCase):
             with self.assertRaises(ValueError):
                 list(player.play(start_offset=total_len + 100))
 
-    def test_padding_calculation(self):
+    def test_player_tar_block_padding_alignment(self):
         """Verifica que el padding rellene hasta el múltiplo de 512 (ADR-002/004)."""
 
         # Creamos un archivo de 1 solo byte.
@@ -150,3 +153,31 @@ class TestStreamingEngine(TarTapeTestCase):
                 # Solo debería existir b.txt, nada de a.txt
                 self.assertEqual(len(names), 1)
                 self.assertTrue(names[0].endswith("b.txt"))
+
+    def test_player_spot_check_detection(self):
+        """Verifica que el muestreo aleatorio (Spot Check) detecte mutaciones."""
+
+        for i in range(20):
+            self.create_file(f"file_{i}.txt", "content")
+
+        TapeRecorder(self.data_dir).commit()
+
+        # Corrompemos un archivo específico
+        corrupt_file = self.data_dir / "file_10.txt"
+        os.utime(corrupt_file, (time.time() + 1000, time.time() + 1000))
+
+        with Tape.discover(self.data_dir) as tape:
+            player = TapePlayer(tape, self.data_dir)
+
+            found_error = False
+            for _ in range(3):
+                try:
+                    # El spot_check se ejecuta dentro de play() si fast_verify=True
+                    list(player.play(fast_verify=True))
+                except RuntimeError:
+                    found_error = True
+                    break
+
+            self.assertTrue(
+                found_error, "El spot check no detectó la mutación del archivo"
+            )

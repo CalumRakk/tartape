@@ -3,7 +3,7 @@ from tartape.tape import Tape
 from tests.base import TarTapeTestCase
 
 
-class TestRecorderSalvaguarda(TarTapeTestCase):
+class TestHeader(TarTapeTestCase):
     def test_deterministic_ordering_adr001(self):
         """Garantiza que el orden en la DB sea siempre alfabético."""
         self.create_file("z.txt")
