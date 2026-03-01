@@ -95,7 +95,9 @@ TarTape provides full visibility into the streaming process. Every chunk of data
 
 ## Constraints & Considerations
 
-*   **Path Limit:** Maximum length of **255 characters**. This is a hard limit to ensure stream predictability.
+*   **Path & Component Limits:** To ensure a 100% predictable archive layout, TarTape enforces strict length limits:
+    *   **Full path:** Maximum of **255 bytes**.
+    *   **Individual component:** Maximum of **100 bytes** for any single file or directory name. This ensures every entry has its own independent integrity header (Type '5') without relying on variable-sized metadata blocks.
 *   **Anonymization:** User/Group IDs and names are scrubbed by default. This ensures privacy and consistent fingerprints across different environments.
 *   **Standard Compatibility:** Generated archives are fully compatible with modern TAR tools (`tar`, `7-zip`, etc.).
 *   **Supported Types:** Handles Files, Directories, and Symlinks. Sockets, Pipes, and Devices are ignored.

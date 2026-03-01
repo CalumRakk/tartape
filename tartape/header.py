@@ -67,7 +67,6 @@ class TarHeader:
                     best_prefix, best_name = prefix, name
 
         if best_name is None or best_prefix is None:
-            # With the component size limit checked, it's theoretically impossible to reach this point. It's included just in case.
             raise ValueError(
                 f"Path '{path}' cannot be split into USTAR prefix/name. "
                 f"Check that directory names are not preventing a valid split at a '/'."
