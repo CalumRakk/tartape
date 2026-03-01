@@ -48,6 +48,9 @@ class Track(BaseModel):
 
     _source_root = None
 
+    @property
+    def is_file(self) -> bool:
+        return not (self.is_dir or self.is_symlink)
 
     @property
     def has_content(self) -> bool:
@@ -85,7 +88,6 @@ class Track(BaseModel):
         content_size = self.size if not (self.is_dir or self.is_symlink) else 0
         return TAR_BLOCK_SIZE + content_size + self.padding_size
 
-
     def validate_integrity(self, tape_root_directory: Path):
         """
         Receive the ROOT of the folder being streamed.
@@ -102,7 +104,6 @@ class Track(BaseModel):
         stats = TarEntryFactory.inspect(full_disk_path)
         if not stats.exists:
             raise RuntimeError(f"File missing: {self.arc_path}")
-
 
         if self.is_dir:
             # ADR-002: Root's mtime is ignored

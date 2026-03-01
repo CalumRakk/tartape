@@ -20,26 +20,24 @@ class TapeRecorder:
     def __init__(
         self,
         directory: str | Path,
-        tartape_path: Optional[Path] = None,
         exclude: Optional[ExcludeType] = None,
         anonymize: bool = True,
     ):
-        self.directory = Path(directory).absolute()
+        self.directory = Path(directory).resolve()
         if not self.directory.is_dir():
-            raise ValueError(f"The root path '{directory}' must be a directory.")
+            raise ValueError(f"Root path '{directory}' must be a directory.")
 
         self.exclude = exclude
         self.anonymize = anonymize
+        self.tape_db_path = self.directory / TAPE_METADATA_DIR / TAPE_DB_NAME
 
-        self.tape_dir = self.directory / TAPE_METADATA_DIR
-        self.tape_db_path = self.tape_dir / TAPE_DB_NAME
         if self.tape_db_path.exists():
-            raise FileExistsError(f"Ya existe una cinta en: {self.tape_db_path}")
+            raise FileExistsError(f"Tape already exists at: {self.tape_db_path}")
 
         self._temp_dir = tempfile.TemporaryDirectory()
-        self._temp_path = Path(self._temp_dir.name) / self.tape_db_path.name
-        self.temp_tape_db = DatabaseSession(self._temp_path)
-        self.db = self.temp_tape_db.connect()
+        self._temp_path = Path(self._temp_dir.name) / TAPE_DB_NAME
+        self.temp_session = DatabaseSession(self._temp_path)
+        self.db = self.temp_session.connect()
 
         self._buffer = []
         self._batch_size = 300
@@ -48,15 +46,14 @@ class TapeRecorder:
         """Generates the identity hash based on the contents of the database."""
         sha = hashlib.sha256()
         for track in Track.select().order_by(Track.arc_path):
-            entry_data = f"{track.arc_path}|{track.size}|{track.mtime}"
-            sha.update(entry_data.encode())
+            sha.update(f"{track.arc_path}|{track.size}|{track.mtime}".encode())
         return sha.hexdigest()
 
-    def _finalize_tape(self):
-        self.tape_dir.mkdir(exist_ok=True, parents=True)
-
+    def _finalize_storage(self):
+        dest_dir = self.directory / TAPE_METADATA_DIR
+        dest_dir.mkdir(exist_ok=True)
         shutil.move(str(self._temp_path), str(self.tape_db_path))
-        self._temp_dir.cleanup()
+
         logger.info(f"Tape successfully recorded on: {self.tape_db_path}")
 
     def commit(self) -> str:
@@ -64,42 +61,62 @@ class TapeRecorder:
         Calculates offsets, generates signature and saves metadata.
         Returns the signature (fingerprint).
         """
-        self._scan_root()
 
-        self.flush()
+        try:
+            self._run_discovery()
+            self._flush_buffer()
 
-        current_offset = 0
-
-        with self.db.atomic():
-            # Important for deterministic ordering
-            tracks = cast(Iterable[Track], Track.select().order_by(Track.arc_path))
             current_offset = 0
 
-            for track in tracks:
-                track.start_offset = current_offset
-                current_offset += track.total_block_size
-                track.end_offset = current_offset
-                track.save()  # TODO: move to a buffer.
+            with self.db.atomic():
+                # ADR-001: Important for deterministic ordering
+                tracks = cast(Iterable[Track], Track.select().order_by(Track.arc_path))
+                current_offset = 0
 
-            total_tape_size = current_offset + TAR_FOOTER_SIZE
-            fingerprint = self._calculate_fingerprint()
+                for track in tracks:
+                    track.start_offset = current_offset
+                    current_offset += track.total_block_size
+                    track.end_offset = current_offset
+                    track.save()  # TODO: move to a buffer.
 
-            TapeMetadata.insert(
-                key="fingerprint", value=fingerprint
-            ).on_conflict_replace().execute()
-            TapeMetadata.insert(
-                key="total_size", value=str(total_tape_size)
-            ).on_conflict_replace().execute()
+                total_size = current_offset + TAR_FOOTER_SIZE
+                fingerprint = self._calculate_fingerprint()
 
-        self.temp_tape_db.close()
-        self._finalize_tape()
-        return fingerprint
+                TapeMetadata.insert(key="fingerprint", value=fingerprint).execute()
+                TapeMetadata.insert(key="total_size", value=str(total_size)).execute()
 
-    def _scan_root(self):
-        prefix = self.directory.name
-        self._add_to_buffer(self.directory, arcname=prefix)
+            self.temp_session.close()
+            self._finalize_storage()
+            return fingerprint
 
-        self._recursive_scan(self.directory, prefix)
+        finally:
+            self.temp_session.close()
+            self._temp_dir.cleanup()
+
+    def _run_discovery(self):
+        """Scans the filesystem in a deterministic manner."""
+
+        self._add_to_buffer(self.directory, arcname=self.directory.name)
+
+        # sorted(os.listdir) to guarantee order before the database
+        stack = [(self.directory, self.directory.name)]
+
+        while stack:
+            curr_dir, arc_prefix = stack.pop()
+            try:
+                entries = sorted(os.listdir(curr_dir))
+                for name in entries:
+                    full_path = curr_dir / name
+                    if self._should_exclude(full_path):
+                        continue
+
+                    arc_name = f"{arc_prefix}/{name}"
+                    self._add_to_buffer(full_path, arcname=arc_name)
+
+                    if full_path.is_dir() and not full_path.is_symlink():
+                        stack.append((full_path, arc_name))
+            except PermissionError:
+                logger.warning(f"Permission denied: {curr_dir}")
 
     def _recursive_scan(self, current_path: Path, arc_prefix: str):
         stack = [(self.directory, self.directory.name)]
@@ -124,7 +141,6 @@ class TapeRecorder:
             except PermissionError:
                 logger.warning(f"Permission denied: {current_path}")
 
-
     def _add_to_buffer(self, source_path: Path, arcname: str):
         """Parses a file and adds it to the insert buffer."""
 
@@ -142,7 +158,7 @@ class TapeRecorder:
             self._buffer.append(track)
 
             if len(self._buffer) >= self._batch_size:
-                self.flush()
+                self._flush_buffer()
 
     def _should_exclude(self, path: Path) -> bool:
         """Determines if a path should be skipped based on the 'self.exclude'."""
@@ -159,7 +175,7 @@ class TapeRecorder:
             return any(path.match(p) or path.name == p for p in self.exclude)
         return False
 
-    def flush(self):
+    def _flush_buffer(self):
         """Write the buffer to the database."""
         if not self._buffer:
             return
@@ -171,4 +187,4 @@ class TapeRecorder:
         self._buffer = []
 
     def close(self):
-        self.temp_tape_db.close()
+        self.temp_session.close()
