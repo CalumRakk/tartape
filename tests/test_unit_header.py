@@ -16,7 +16,6 @@ class TestHeader(TarTapeTestCase):
         self.assertEqual(len(header.build()), 512)
 
     def test_symlink_target_too_long(self):
-        # TODO ¿ESTO YA ESTA VERIFICADO?
         """Verifica el límite de 100 bytes para el destino de symlinks."""
         long_target = "b" * 110
         entry = self.create_minimal_track(is_symlink=True, linkname=long_target)

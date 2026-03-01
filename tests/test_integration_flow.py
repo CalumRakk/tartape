@@ -3,6 +3,7 @@ import os
 import tarfile
 import time
 
+from tartape.exceptions import TarIntegrityError
 from tartape.player import TapePlayer
 from tartape.recorder import TapeRecorder
 from tartape.schemas import TarFileDataEvent
@@ -85,6 +86,8 @@ class TestFlow(TarTapeTestCase):
 
         with Tape.discover(self.data_dir) as tape:
             player = TapePlayer(tape, self.data_dir)
-            with self.assertRaisesRegex(RuntimeError, "Directory structure changed"):
+            with self.assertRaisesRegex(
+                TarIntegrityError, "Directory structure changed"
+            ):
                 for _ in player.play(fast_verify=False):
                     pass

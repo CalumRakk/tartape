@@ -10,6 +10,7 @@ from peewee import (
 
 from tartape.constants import TAR_BLOCK_SIZE
 from tartape.database import db_proxy
+from tartape.exceptions import TarIntegrityError
 
 
 class BaseModel(Model):
@@ -103,24 +104,24 @@ class Track(BaseModel):
 
         stats = TarEntryFactory.inspect(full_disk_path)
         if not stats.exists:
-            raise RuntimeError(f"File missing: {self.arc_path}")
+            raise TarIntegrityError(f"File missing: {self.arc_path}")
 
         if self.is_dir:
             # ADR-002: Root's mtime is ignored
             if self.rel_path in ("", "."):
                 return
             if stats.mtime != self.mtime:
-                raise RuntimeError(f"Directory structure changed: {self.arc_path}")
+                raise TarIntegrityError(f"Directory structure changed: {self.arc_path}")
             return
 
         if stats.mtime != self.mtime:
-            raise RuntimeError(f"File modified (mtime): {self.arc_path}")
+            raise TarIntegrityError(f"File modified (mtime): {self.arc_path}")
 
         if not self.is_symlink:
             if stats.size != self.size:
-                raise RuntimeError(f"File size changed: {self.arc_path}")
+                raise TarIntegrityError(f"File size changed: {self.arc_path}")
             if stats.mode != self.mode:
-                raise RuntimeError(f"Permissions changed: {self.arc_path}")
+                raise TarIntegrityError(f"Permissions changed: {self.arc_path}")
         else:
             if stats.linkname != self.linkname:
-                raise RuntimeError(f"Symlink target changed: {self.arc_path}")
+                raise TarIntegrityError(f"Symlink target changed: {self.arc_path}")

@@ -3,6 +3,7 @@ import os
 import tarfile
 import time
 
+from tartape.exceptions import TarIntegrityError
 from tartape.models import Track
 from tartape.player import TapePlayer
 from tartape.recorder import TapeRecorder
@@ -174,7 +175,7 @@ class TestStreamingEngine(TarTapeTestCase):
                 try:
                     # El spot_check se ejecuta dentro de play() si fast_verify=True
                     list(player.play(fast_verify=True))
-                except RuntimeError:
+                except TarIntegrityError:
                     found_error = True
                     break
 

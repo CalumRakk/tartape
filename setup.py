@@ -1,10 +1,12 @@
 import setuptools
 
+
 def get_version():
     with open("tartape/__init__.py") as f:
         for line in f:
             if line.startswith("__version__"):
                 return line.split("=")[1].strip().strip('"')
+
 
 with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
@@ -33,5 +35,6 @@ setuptools.setup(
     install_requires=[
         "peewee>=3.18.0",
     ],
+    package_data={"tartape": ["py.typed"]},
     keywords="tar, streaming, deterministic, resumable, cloud-backup, storage",
 )

@@ -38,6 +38,7 @@ class TapePlayer:
 
         current_sample_size = min(sample_size, total_tracks)
         import peewee
+
         # SQLite to give us N random records
         samples = Track.select().order_by(peewee.fn.Random()).limit(current_sample_size)
 
@@ -100,10 +101,12 @@ class TapePlayer:
                 self._verify_resume_point(start_offset)
 
             # Find those whose 'end_offset' is greater than our starting point
-            query = cast(Iterable[Track],
+            query = cast(
+                Iterable[Track],
                 Track.select()
                 .where(Track.end_offset > start_offset)
                 .order_by(Track.arc_path)
+                .iterator(),
             )
 
             def track_to_entry_gen():

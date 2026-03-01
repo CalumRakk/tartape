@@ -10,7 +10,7 @@ from tartape.constants import TAPE_DB_NAME, TAPE_METADATA_DIR
 from tartape.database import DatabaseSession
 from tartape.factory import ExcludeType, TarEntryFactory
 
-from .constants import TAR_FOOTER_SIZE
+from .constants import DEFAULT_EXCLUDES, TAR_FOOTER_SIZE
 from .models import TapeMetadata, Track
 
 logger = logging.getLogger(__name__)
@@ -27,7 +27,7 @@ class TapeRecorder:
         if not self.directory.is_dir():
             raise ValueError(f"Root path '{directory}' must be a directory.")
 
-        self.exclude = exclude
+        self.exclude = DEFAULT_EXCLUDES if exclude is None else exclude
         self.anonymize = anonymize
         self.tape_db_path = self.directory / TAPE_METADATA_DIR / TAPE_DB_NAME
 
@@ -45,7 +45,7 @@ class TapeRecorder:
     def _calculate_fingerprint(self):
         """Generates the identity hash based on the contents of the database."""
         sha = hashlib.sha256()
-        for track in Track.select().order_by(Track.arc_path):
+        for track in Track.select().order_by(Track.arc_path).iterator():
             sha.update(f"{track.arc_path}|{track.size}|{track.mtime}".encode())
         return sha.hexdigest()
 
@@ -72,12 +72,24 @@ class TapeRecorder:
                 # ADR-001: Important for deterministic ordering
                 tracks = cast(Iterable[Track], Track.select().order_by(Track.arc_path))
                 current_offset = 0
+                batch = []
 
                 for track in tracks:
                     track.start_offset = current_offset
                     current_offset += track.total_block_size
                     track.end_offset = current_offset
-                    track.save()  # TODO: move to a buffer.
+                    batch.append(track)
+
+                    if len(batch) == self._batch_size:
+                        Track.bulk_update(
+                            batch, fields=[Track.start_offset, Track.end_offset]
+                        )
+                        batch = []
+                if batch:
+                    Track.bulk_update(
+                        batch, fields=[Track.start_offset, Track.end_offset]
+                    )
+                    batch = []
 
                 total_size = current_offset + TAR_FOOTER_SIZE
                 fingerprint = self._calculate_fingerprint()
@@ -117,29 +129,6 @@ class TapeRecorder:
                         stack.append((full_path, arc_name))
             except PermissionError:
                 logger.warning(f"Permission denied: {curr_dir}")
-
-    def _recursive_scan(self, current_path: Path, arc_prefix: str):
-        stack = [(self.directory, self.directory.name)]
-        self._add_to_buffer(self.directory, arcname=self.directory.name)
-
-        while stack:
-            current_path, arc_prefix = stack.pop()
-
-            try:
-                with os.scandir(current_path) as it:
-                    for entry in it:
-                        entry_path = Path(entry.path)
-
-                        if self._should_exclude(entry_path):
-                            continue
-
-                        entry_arcname = f"{arc_prefix}/{entry.name}"
-                        self._add_to_buffer(entry_path, arcname=entry_arcname)
-
-                        if entry.is_dir() and not entry.is_symlink():
-                            stack.append((entry_path, entry_arcname))
-            except PermissionError:
-                logger.warning(f"Permission denied: {current_path}")
 
     def _add_to_buffer(self, source_path: Path, arcname: str):
         """Parses a file and adds it to the insert buffer."""

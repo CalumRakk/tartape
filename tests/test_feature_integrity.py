@@ -1,6 +1,7 @@
 import os
 import time
 
+from tartape.exceptions import TarIntegrityError
 from tartape.player import TapePlayer
 from tartape.recorder import TapeRecorder
 from tartape.tape import Tape
@@ -20,7 +21,7 @@ class TestIntegritySafeguards(TarTapeTestCase):
 
         with Tape.discover(self.data_dir) as tape:
             player = TapePlayer(tape, self.data_dir)
-            with self.assertRaisesRegex(RuntimeError, "File modified"):
+            with self.assertRaisesRegex(TarIntegrityError, "File modified"):
                 for _ in player.play(fast_verify=False):
                     pass
 
@@ -39,7 +40,7 @@ class TestIntegritySafeguards(TarTapeTestCase):
         tape = Tape.discover(self.data_dir)
         player = TapePlayer(tape, directory=self.data_dir)
 
-        with self.assertRaisesRegex(RuntimeError, "File modified"):
+        with self.assertRaisesRegex(TarIntegrityError, "File modified"):
             for _ in player.play(fast_verify=False):
                 pass
 
@@ -53,7 +54,7 @@ class TestIntegritySafeguards(TarTapeTestCase):
         f.write_text("original plus more")
 
         tape = Tape.discover(self.data_dir)
-        with self.assertRaisesRegex(RuntimeError, "File size changed"):
+        with self.assertRaisesRegex(TarIntegrityError, "File size changed"):
             for _ in TapePlayer(tape, self.data_dir).play(fast_verify=False):
                 pass
 

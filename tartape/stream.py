@@ -3,6 +3,7 @@ import logging
 from pathlib import Path
 from typing import Generator, Iterable, Optional
 
+from tartape.exceptions import TarIntegrityError
 from tartape.header import TarHeader
 
 from .constants import CHUNK_SIZE_DEFAULT, TAR_BLOCK_SIZE, TAR_FOOTER_SIZE
@@ -18,12 +19,6 @@ from .schemas import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-class TarIntegrityError(Exception):
-    """Exception thrown when disk does not match inventory (ADR-002)."""
-
-    pass
 
 
 class TarStreamGenerator:
@@ -102,7 +97,9 @@ class TarStreamGenerator:
             header = self._build_header(entry)[local_skip:]
             yield TarFileDataEvent(type="file_data", data=header)
 
-    def _get_stream_window(self, global_skip: int, block_start: int, block_length: int) -> tuple[int, int]:
+    def _get_stream_window(
+        self, global_skip: int, block_start: int, block_length: int
+    ) -> tuple[int, int]:
         """
         Given a global resume position and a data block,
         calculate the local offset and how many bytes actually need to be sent.
@@ -144,14 +141,16 @@ class TarStreamGenerator:
                 while bytes_remaining > 0:
                     read_size = min(chunk_size, bytes_remaining)
                     chunk = f.read(read_size)
-                    if not chunk: raise RuntimeError(f"File shrunk: '{entry.source_path}'")
+                    if not chunk:
+                        raise TarIntegrityError(f"File shrunk: '{entry.source_path}'")
 
-                    if md5: md5.update(chunk)
+                    if md5:
+                        md5.update(chunk)
                     bytes_remaining -= len(chunk)
                     yield TarFileDataEvent(type="file_data", data=chunk)
 
                     if local_skip == 0 and f.read(1):
-                        raise RuntimeError(f"File grew: '{entry.source_path}'")
+                        raise TarIntegrityError(f"File grew: '{entry.source_path}'")
 
         except OSError as e:
             raise TarIntegrityError(f"Error leyendo {entry.source_path}") from e
