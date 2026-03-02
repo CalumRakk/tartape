@@ -20,7 +20,19 @@ class Tape:
 
     def __init__(self, db_path: str | Path):
         self.path = Path(db_path)
-        self.db = DatabaseSession(self.path)
+        self.db_session = DatabaseSession(self.path)
+
+    def _query_metadata(self, key: str) -> str:
+        already_open = not self.db_session.db.is_closed()
+        if not already_open:
+            self.db_session.connect()
+
+        try:
+            return TapeMetadata.get(TapeMetadata.key == key).value
+        finally:
+            # We only close if we were the ones who opened it
+            if not already_open:
+                self.db_session.close()
 
     @classmethod
     def open(cls, path: str | Path) -> "Tape":
@@ -54,13 +66,12 @@ class Tape:
     @property
     def fingerprint(self) -> str:
         """Returns the digital signature of the tape."""
-        return TapeMetadata.get(TapeMetadata.key == "fingerprint").value
+        return self._query_metadata("fingerprint")
 
     @property
     def total_size(self) -> int:
         """Returns the total size that the TAR stream will have (bytes)."""
-        val = TapeMetadata.get(TapeMetadata.key == "total_size").value
-        return int(val)
+        return int(self._query_metadata("total_size"))
 
     def get_tracks(self) -> Iterable[Track]:
         """Returns all tracks sorted for the stream."""
@@ -68,11 +79,11 @@ class Tape:
 
     def close(self):
         """Close the connection to the tape database."""
-        self.db.close()
+        self.db_session.close()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
 
     def __enter__(self):
-        self.db.connect()
+        self.db_session.connect()
         return self

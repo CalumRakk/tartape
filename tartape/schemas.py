@@ -1,7 +1,56 @@
 from dataclasses import dataclass
-from typing import Literal, Optional, Union
+from enum import Enum
+from typing import Any, Dict, List, Literal, Optional, Union
 
 from tartape.models import Track
+
+
+class EntryState(str, Enum):
+    """The state of a file in a volume."""
+
+    COMPLETE = "complete"  # The file starts and ends in this volume
+    HEAD = "head"  # It starts here, but ends in a future volume
+    BODY = "body"  # It comes from the past, passes through here, and goes to the future
+    TAIL = "tail"  # It comes from the past and ends in this volume
+
+
+@dataclass(frozen=True)
+class ManifestEntry:
+    arc_path: str
+    state: EntryState
+    # Byte within THIS volume where the file data begins
+    offset_in_volume: int
+    # How many bytes of this file physically reside in this volume
+    bytes_in_volume: int
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "arc_path": self.arc_path,
+            "state": self.state.value,
+            "offset_in_volume": self.offset_in_volume,
+            "bytes_in_volume": self.bytes_in_volume,
+        }
+
+
+@dataclass(frozen=True)
+class VolumeManifest:
+    tape_fingerprint: str
+    volume_index: int
+    start_offset: int
+    end_offset: int
+    chunk_size: int
+    entries: List[ManifestEntry]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "tape_fingerprint": self.tape_fingerprint,
+            "volume_index": self.volume_index,
+            "start_offset": self.start_offset,
+            "end_offset": self.end_offset,
+            "chunk_size": self.chunk_size,
+            "entries": [e.to_dict() for e in self.entries],
+        }
+
 
 @dataclass(frozen=True)
 class DiskEntryStats:
@@ -17,6 +66,7 @@ class DiskEntryStats:
     is_file: bool = False
     is_symlink: bool = False
     linkname: str = ""
+
 
 @dataclass(frozen=True)
 class FileStartMetadata:
