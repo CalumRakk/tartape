@@ -1,10 +1,10 @@
 import io
 import tarfile
 
+from tartape.catalog import Catalog
 from tartape.chunker import TarChunker
 from tartape.player import TapePlayer
 from tartape.recorder import TapeRecorder
-from tartape.tape import Tape
 from tests.base import TarTapeTestCase
 
 
@@ -21,7 +21,7 @@ class TestChunkingIntegration(TarTapeTestCase):
         recorder = TapeRecorder(self.data_dir)
         recorder.commit()
 
-        with Tape.discover(self.data_dir) as tape:
+        with Catalog.discover(self.data_dir) as tape:
             player = TapePlayer(tape, self.data_dir)
             # Planifica trozos pequeños 2048 bytes
             chunker = TarChunker(tape, chunk_size=2048)
@@ -57,7 +57,7 @@ class TestChunkingIntegration(TarTapeTestCase):
         self.create_file("data.bin", "A" * 10000)
         TapeRecorder(self.data_dir).commit()
 
-        with Tape.discover(self.data_dir) as tape:
+        with Catalog.discover(self.data_dir) as tape:
             chunker = TarChunker(tape, chunk_size=1024)
             plan1 = chunker.generate_plan()
             plan2 = chunker.generate_plan()

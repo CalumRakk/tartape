@@ -2,9 +2,9 @@ import logging
 from pathlib import Path
 from typing import Generator, Iterable, cast
 
+from tartape.catalog import Catalog
 from tartape.schemas import TarEvent
 from tartape.stream import TarStreamGenerator
-from tartape.tape import Tape
 
 from .models import Track
 
@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 class TapePlayer:
-    def __init__(self, tape: Tape, directory: str | Path):
+    def __init__(self, tape: Catalog, directory: str | Path):
         self.tape = tape
         self.directory = Path(directory).absolute()
 

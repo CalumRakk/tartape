@@ -1,5 +1,5 @@
+from tartape.catalog import Catalog
 from tartape.recorder import TapeRecorder
-from tartape.tape import Tape
 from tests.base import TarTapeTestCase
 
 
@@ -13,7 +13,7 @@ class TestHeader(TarTapeTestCase):
         recorder = TapeRecorder(self.data_dir)
         recorder.commit()
 
-        with Tape.discover(self.data_dir) as tape:
+        with Catalog.discover(self.data_dir) as tape:
             tracks = [t.arc_path for t in tape.get_tracks() if t.is_file]
             # Debería ser [dataset/a.txt, dataset/m.txt, dataset/z.txt]
             self.assertEqual(tracks, sorted(tracks))
@@ -26,7 +26,7 @@ class TestHeader(TarTapeTestCase):
         recorder = TapeRecorder(self.data_dir, exclude="*.log")
         recorder.commit()
 
-        with Tape.discover(self.data_dir) as tape:
+        with Catalog.discover(self.data_dir) as tape:
             paths = [t.arc_path for t in tape.get_tracks()]
             self.assertTrue(any("keep.txt" in p for p in paths))
             self.assertFalse(any("ignore.log" in p for p in paths))

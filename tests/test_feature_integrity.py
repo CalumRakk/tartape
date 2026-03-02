@@ -1,10 +1,10 @@
 import os
 import time
 
+from tartape.catalog import Catalog
 from tartape.exceptions import TarIntegrityError
 from tartape.player import TapePlayer
 from tartape.recorder import TapeRecorder
-from tartape.tape import Tape
 from tests.base import TarTapeTestCase
 
 
@@ -19,7 +19,7 @@ class TestIntegritySafeguards(TarTapeTestCase):
         # Mutación T1
         os.utime(f, (time.time() + 1000, time.time() + 1000))
 
-        with Tape.discover(self.data_dir) as tape:
+        with Catalog.discover(self.data_dir) as tape:
             player = TapePlayer(tape, self.data_dir)
             with self.assertRaisesRegex(TarIntegrityError, "File modified"):
                 for _ in player.play(fast_verify=False):
@@ -37,7 +37,7 @@ class TestIntegritySafeguards(TarTapeTestCase):
         # Mutación: Cambiamos mtime al futuro
         os.utime(f, (time.time() + 100, time.time() + 100))
 
-        tape = Tape.discover(self.data_dir)
+        tape = Catalog.discover(self.data_dir)
         player = TapePlayer(tape, directory=self.data_dir)
 
         with self.assertRaisesRegex(TarIntegrityError, "File modified"):
@@ -53,7 +53,7 @@ class TestIntegritySafeguards(TarTapeTestCase):
 
         f.write_text("original plus more")
 
-        tape = Tape.discover(self.data_dir)
+        tape = Catalog.discover(self.data_dir)
         with self.assertRaisesRegex(TarIntegrityError, "File size changed"):
             for _ in TapePlayer(tape, self.data_dir).play(fast_verify=False):
                 pass
@@ -65,7 +65,7 @@ class TestIntegritySafeguards(TarTapeTestCase):
         recorder = TapeRecorder(self.data_dir, anonymize=True)
         recorder.commit()
 
-        with Tape.discover(self.data_dir) as tape:
+        with Catalog.discover(self.data_dir) as tape:
             track = list(tape.get_tracks())[1]
 
             self.assertEqual(track.uid, 0)

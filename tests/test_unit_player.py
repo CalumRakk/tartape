@@ -3,12 +3,12 @@ import os
 import tarfile
 import time
 
+from tartape.catalog import Catalog
 from tartape.exceptions import TarIntegrityError
 from tartape.models import Track
 from tartape.player import TapePlayer
 from tartape.recorder import TapeRecorder
 from tartape.schemas import TarFileDataEvent
-from tartape.tape import Tape
 from tests.base import TarTapeTestCase
 
 
@@ -28,7 +28,7 @@ class TestStreamingEngine(TarTapeTestCase):
         recorder = TapeRecorder(self.data_dir)
         recorder.commit()
 
-        with Tape.discover(self.data_dir) as tape:
+        with Catalog.discover(self.data_dir) as tape:
             player = TapePlayer(tape, self.data_dir)
 
             full_buffer = io.BytesIO()
@@ -90,7 +90,7 @@ class TestStreamingEngine(TarTapeTestCase):
         recorder = TapeRecorder(self.data_dir)
         recorder.commit()
 
-        with Tape.discover(self.data_dir) as tape:
+        with Catalog.discover(self.data_dir) as tape:
 
             # --- Solo calculos de offsets y tamaños, sin leer el stream aún ---
             track = next(t for t in tape.get_tracks() if filename in t.arc_path)
@@ -135,7 +135,7 @@ class TestStreamingEngine(TarTapeTestCase):
 
         TapeRecorder(self.data_dir).commit()
 
-        with Tape.discover(self.data_dir) as tape:
+        with Catalog.discover(self.data_dir) as tape:
             # Buscamos el offset exacto donde empieza b.txt en el stream
             track_b = [t for t in tape.get_tracks() if "b.txt" in t.arc_path][0]
             start_offset = track_b.start_offset
@@ -167,7 +167,7 @@ class TestStreamingEngine(TarTapeTestCase):
         corrupt_file = self.data_dir / "file_10.txt"
         os.utime(corrupt_file, (time.time() + 1000, time.time() + 1000))
 
-        with Tape.discover(self.data_dir) as tape:
+        with Catalog.discover(self.data_dir) as tape:
             player = TapePlayer(tape, self.data_dir)
 
             found_error = False

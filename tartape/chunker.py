@@ -2,10 +2,10 @@ import logging
 import math
 from typing import Generator, List, Optional, Tuple
 
+from tartape.catalog import Catalog
 from tartape.models import Track
 from tartape.player import TapePlayer
 from tartape.schemas import EntryState, ManifestEntry, VolumeManifest
-from tartape.tape import Tape
 from tartape.volume import TarVolume
 
 logger = logging.getLogger(__name__)
@@ -14,11 +14,11 @@ logger = logging.getLogger(__name__)
 class TarChunker:
     """
     High-level volume scheduler.
-    Divides a Master Tape into logical segments (VolumeManifest) and
+    Divides a Master Catalog into logical segments (VolumeManifest) and
     generates adapters (TarVolume) ready for network transmission.
     """
 
-    def __init__(self, tape: Tape, chunk_size: int):
+    def __init__(self, tape: Catalog, chunk_size: int):
         if chunk_size <= 0:
             raise ValueError("The volume size (chunk_size) must be greater than 0.")
 

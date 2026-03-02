@@ -1,14 +1,14 @@
 # TarTape
 
-**TarTape** is a streaming engine designed to turn massive folders into TAR archives with absolute predictability.
+**TarTape** is a streaming engine designed to turn massive directories into deterministic TAR archives on-the-fly, without requiring intermediate storage.
 
-Standard archiving tools are dynamic: their internal structure changes depending on file names and sizes. This makes it impossible to know the exact layout of the archive until it is fully created.
+It is purpose-built for **cloud-native backups and large-scale data movement** where you need to stream terabytes of data directly to remote storage (S3, Azure, GCP). It eliminates the need to duplicate local disk space and provides the unique ability to resume failed uploads instantly from the exact byte they stopped.
 
-**TarTape changes the rules.** It organizes your data into a "Master Tape" where every file entry follows a strict, fixed-size layout. This creates a **predictable stream** that solves the biggest challenges of large-scale data transfers:
-
-*   **Resume interrupted uploads:** If a 10TB transfer fails at 4.2TB, TarTape knows the exact byte where it left off and can resume instantly without re-scanning the source.
-*   **Verify Integrity:** It ensures the files you are streaming haven't changed since you first "recorded" the tape.
-*   **Navigate the Stream:** Jump to any file or offset within the archive without having to process the preceding data.
+### Why is it useful?
+*   **Zero-Copy Streaming:** Generates the TAR stream "in-flight" while transmitting. If your dataset is 100GB, you transmit 100GB without using a single extra GB of local cache.
+*   **Byte-Level Resume:** If a 500GB upload fails at 80%, TarTape knows exactly at which byte the error occurred. You can resume the stream from that specific offset without re-scanning the source.
+*   **Logical Volume Slicing:** Easily split a massive stream into fixed-size volumes (e.g., 5GB parts) to meet cloud provider upload limits, while maintaining a single valid TAR structure.
+*   **Stream Navigation:** Jump to any file or offset within the resulting archive without having to process or read the preceding data.
 
 
 ---
@@ -19,66 +19,79 @@ Standard archiving tools are dynamic: their internal structure changes depending
 pip install tartape
 ```
 
+
 ## Usage Examples
 
 ### 1. Recording the Tape
-Before streaming, you must "record" the folder. This creates a snapshot (stored in .tartape/index.db) that calculates the exact position of every file.
+Before streaming, you must "record" the directory state. This creates a lightweight index in `.tartape/index.db`.
 
 ```python
-from tartape import TapeRecorder
+import tartape
 
-# This creates the .tartape metadata folder inside your dataset
-recorder = TapeRecorder("./massive_dataset")
-fingerprint = recorder.commit()
+# Scan the dataset and generate the integrity catalog
+tape = tartape.create("./massive_dataset")
 
-print(f"Tape ready. Fingerprint: {fingerprint}")
+print(f"Fingerprint: {tape.fingerprint}")
+print(f"Total stream size: {tape.total_size} bytes")
 ```
 
-### 2. Basic Streaming
-
-Once recorded, you can stream the folder to any destination (Cloud, Disk, Network). TarTape ensures the stream is exactly as described in the metadata.
+### 2. Direct Streaming (Single-file Upload)
+If you don't need to split the archive, you can consume the byte stream directly.
 
 ```python
-from tartape import Tape, TapePlayer
+import requests
+import tartape
 
-# Discover the tape and start the player
-tape = Tape.discover("./massive_dataset")
-player = TapePlayer(tape, directory="./massive_dataset")
+with tartape.open("./massive_dataset") as tape:
+    # 'play' emits events. We filter for 'file_data' to get raw bytes.
+    def data_generator():
+        for event in tape.play():
+            if event.type == "file_data":
+                yield event.data
 
-with open("backup.tar", "wb") as f:
-    # Every event contains data chunks or metadata
-    for event in player.play():
+    # Send the full TAR stream via HTTP without saving it to disk
+    requests.put("https://storage.com/backup.tar", data=data_generator())
+```
+
+### 3. Volume Slicing (Cloud Slicing)
+Ideal for services like AWS S3 or Azure Blobs that prefer fixed-size parts.
+
+```python
+with tartape.open("./massive_dataset") as tape:
+    # Split the stream into 1GB logical volumes
+    for volume, manifest in tape.iter_volumes(size=1024**3):
+        # 'volume' behaves like an open file (read, seek, tell)
+        upload_to_s3(key=volume.name, body=volume)
+```
+
+### 4. Byte-Perfect Resume
+If a transfer is interrupted, you can resume it from the exact byte where it left off.
+
+```python
+# Suppose logs indicate that 45,678,912 bytes were sent before the error
+LAST_BYTE_SENT = 45678912
+
+with tartape.open("./massive_dataset") as tape:
+    # 'play' will instantly jump to the requested offset
+    for event in tape.play(start_offset=LAST_BYTE_SENT):
         if event.type == "file_data":
-            f.write(event.data)
+            socket.send(event.data)
 ```
 
-### 3. Resuming an Interrupted Stream
-
-Because TarTape uses fixed positions, you can resume a multi-terabyte upload if it fails. You only need to know the last byte successfully sent.
+### 5. Integrity Verification
+Check if local files have mutated (mtime or size) relative to the recorded index.
 
 ```python
-# If the previous upload failed at exactly 5GB...
-start_offset = 5 * 1024 * 1024 * 1024
-
-for event in player.play(start_offset=start_offset):
-    # This skips all previous files and starts streaming
-    # from the exact byte where the failure occurred.
-    upload_to_cloud(event.data)
+with tartape.open("./massive_dataset") as tape:
+    # 'verify' performs a random spot-check for quick detection.
+    # Use verify(deep=True) for a full bit-by-bit audit of every file.
+    try:
+        tape.verify()
+        print("Dataset is consistent with the index.")
+    except Exception as e:
+        print(f"Integrity compromised: {e}")
 ```
 
-### 4. Professional Monitoring
-
-TarTape acts as a "White Box," letting you see exactly which file is being processed and its calculated integrity.
-
-```python
-for event in player.play():
-    if event.type == "file_start":
-        print(f"Archiving: {event.entry.arc_path} at offset {event.metadata.start_offset}")
-
-    elif event.type == "file_end":
-        # Each file reports its MD5 hash calculated on-the-fly
-        print(f"Done: {event.entry.arc_path} | Hash: {event.metadata.md5sum}")
-```
 
 
 ## Observable Events
@@ -93,13 +106,12 @@ TarTape provides full visibility into the streaming process. Every chunk of data
 | `tape_completed` | Emitted after the 1024-byte TAR footer is sent. | - |
 
 
-## Constraints & Considerations
+## Integrity Rules & Constraints
 
-*   **Path & Component Limits:** To ensure a 100% predictable archive layout, TarTape enforces strict length limits:
-    *   **Full path:** Maximum of **255 bytes**.
-    *   **Individual component:** Maximum of **100 bytes** for any single file or directory name. This ensures every entry has its own independent integrity header (Type '5') without relying on variable-sized metadata blocks.
-*   **Anonymization:** User/Group IDs and names are scrubbed by default. This ensures privacy and consistent fingerprints across different environments.
-*   **Standard Compatibility:** Generated archives are fully compatible with modern TAR tools (`tar`, `7-zip`, etc.).
-*   **Supported Types:** Handles Files, Directories, and Symlinks. Sockets, Pipes, and Devices are ignored.
-*   **Strict Integrity:** Any modification, addition, or deletion of files after the recording phase will invalidate the tape and abort the stream.
-*   **Data Portability:** Designed for data movement and cloud streaming. Not intended for forensic OS backups where local ownership must be preserved.
+*   **T0 State Consistency:** If a file changes after it has been recorded, the engine will abort the stream to prevent generating a corrupt or mismatched archive.
+*   **Anonymization:** User/Group IDs (UID/GID) are scrubbed by default. This ensures that the same dataset generates the exact same byte stream (and Hash) regardless of the host machine or user.
+*   **Path Limits:** For universal compatibility and fixed-offset predictability, paths are limited to **255 bytes** total, and individual folder/file names are limited to **100 bytes**.
+
+
+
+*Compatible with Python 3.10+ and any standard extraction tool (tar, 7-zip, etc).*

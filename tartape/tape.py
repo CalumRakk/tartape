@@ -1,89 +1,80 @@
-import logging
 from pathlib import Path
-from typing import Iterable
+from typing import Generator, Optional, Tuple, Union
 
-import peewee
-
-from tartape.constants import TAPE_DB_NAME, TAPE_METADATA_DIR
-
-from .database import DatabaseSession
-from .models import TapeMetadata, Track
-
-logger = logging.getLogger(__name__)
+from tartape.catalog import Catalog
+from tartape.chunker import TarChunker
+from tartape.factory import ExcludeType
+from tartape.player import TapePlayer
+from tartape.recorder import TapeRecorder
+from tartape.schemas import VolumeManifest
+from tartape.volume import TarVolume
 
 
 class Tape:
     """
-    Represents a 'Master Tape' (the .tape/database file).
-    It is the entry point for inspecting metadata and opening players.
+    The Master Class. It represents a complete data tape.
+    It is the engine that orchestrates the Catalog, the Player, and the Chunker.
     """
 
-    def __init__(self, db_path: str | Path):
-        self.path = Path(db_path)
-        self.db_session = DatabaseSession(self.path)
+    def __init__(self, path: Union[str, Path]):
+        self.path = Path(path).resolve()
+        self._catalog: Optional[Catalog] = None
 
-    def _query_metadata(self, key: str) -> str:
-        already_open = not self.db_session.db.is_closed()
-        if not already_open:
-            self.db_session.connect()
+    def __enter__(self):
+        self._open_catalog()
+        return self
 
-        try:
-            return TapeMetadata.get(TapeMetadata.key == key).value
-        finally:
-            # We only close if we were the ones who opened it
-            if not already_open:
-                self.db_session.close()
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self._catalog:
+            self._catalog.close()
 
     @classmethod
-    def open(cls, path: str | Path) -> "Tape":
-        """Opens an existing tape."""
-        logger.info(f"Opening tape from: {path}")
-        if path != ":memory:" and not Path(path).exists():
+    def create(
+        cls,
+        directory: Union[str, Path],
+        exclude: Optional[ExcludeType] = None,
+        anonymize: bool = True,
+    ) -> "Tape":
+        """Record a new tape and return the Tape object."""
+        recorder = TapeRecorder(directory, exclude, anonymize)
+        recorder.commit()
+        return cls(directory)
+
+    @classmethod
+    def open(cls, path: Union[str, Path]) -> "Tape":
+        """Open an existing tape."""
+        if not Path(path).exists():
             raise FileNotFoundError(f"The tape does not exist in: {path}")
-        try:
-            return cls(path)
-        except peewee.OperationalError:
-            logger.error(f"Failed to open tape at {path}. Is it a valid tape file?")
-            raise FileNotFoundError(
-                f"Failed to open tape at {path}. Is it a valid tape file?"
-            )
+        return cls(path)
 
-    @classmethod
-    def discover(cls, directory: str | Path) -> "Tape":
-        """
-        Automatically searches for a .tartape file in the given directory.
-        """
-        target_dir = Path(directory)
-        if not target_dir.is_dir():
-            raise NotADirectoryError(f"{directory} is not a valid directory.")
-
-        candidate = target_dir / TAPE_METADATA_DIR / TAPE_DB_NAME
-        if candidate.exists() and candidate.is_file():
-            return cls(candidate)
-
-        raise FileNotFoundError(f"No tape found in: {candidate}")
+    def _open_catalog(self):
+        if not self._catalog:
+            self._catalog = Catalog.discover(self.path)
 
     @property
     def fingerprint(self) -> str:
-        """Returns the digital signature of the tape."""
-        return self._query_metadata("fingerprint")
+        self._open_catalog()
+        return self._catalog.fingerprint  # type: ignore
 
     @property
     def total_size(self) -> int:
-        """Returns the total size that the TAR stream will have (bytes)."""
-        return int(self._query_metadata("total_size"))
+        self._open_catalog()
+        return self._catalog.total_size  # type: ignore
 
-    def get_tracks(self) -> Iterable[Track]:
-        """Returns all tracks sorted for the stream."""
-        return Track.select().order_by(Track.arc_path)
+    def verify(self, deep: bool = False):
+        """Verify the physical integrity of the disc against the catalog."""
+        self._open_catalog()
+        player = TapePlayer(self._catalog, self.path)  # type: ignore
+        if deep:
+            player._verify()
+        else:
+            player._spot_check()
 
-    def close(self):
-        """Close the connection to the tape database."""
-        self.db_session.close()
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
-
-    def __enter__(self):
-        self.db_session.connect()
-        return self
+    def iter_volumes(
+        self, size: int
+    ) -> Generator[Tuple[TarVolume, VolumeManifest], None, None]:
+        """It breaks the tape down into logical and physical volumes."""
+        self._open_catalog()
+        player = TapePlayer(self._catalog, self.path)  # type: ignore
+        chunker = TarChunker(self._catalog, chunk_size=size)  # type: ignore
+        yield from chunker.iter_volumes(player)

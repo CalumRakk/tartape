@@ -1,7 +1,7 @@
+from tartape.catalog import Catalog
 from tartape.chunker import TarChunker
 from tartape.models import TapeMetadata, Track
 from tartape.schemas import EntryState
-from tartape.tape import Tape
 from tests.base import TarTapeTestCase
 
 
@@ -10,7 +10,7 @@ class TestChunkerLogic(TarTapeTestCase):
     def test_fragmentation_states(self):
         """Verifica que el Chunker identifique correctamente HEAD, BODY, TAIL y COMPLETE."""
 
-        with Tape(":memory:") as tape:
+        with Catalog(":memory:") as tape:
             TapeMetadata.create(key="fingerprint", value="hash123")
             TapeMetadata.create(key="total_size", value="200")
 
@@ -55,7 +55,7 @@ class TestChunkerLogic(TarTapeTestCase):
 
     def test_chunk_size_alignment(self):
         """Verifica que un archivo pequeño quepa exacto como COMPLETE."""
-        with Tape(":memory:") as tape:
+        with Catalog(":memory:") as tape:
             TapeMetadata.create(key="fingerprint", value="small_test")
             TapeMetadata.create(key="total_size", value="100")
 

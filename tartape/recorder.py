@@ -32,7 +32,7 @@ class TapeRecorder:
         self.tape_db_path = self.directory / TAPE_METADATA_DIR / TAPE_DB_NAME
 
         if self.tape_db_path.exists():
-            raise FileExistsError(f"Tape already exists at: {self.tape_db_path}")
+            raise FileExistsError(f"Catalog already exists at: {self.tape_db_path}")
 
         self._temp_dir = tempfile.TemporaryDirectory()
         self._temp_path = Path(self._temp_dir.name) / TAPE_DB_NAME
@@ -54,7 +54,7 @@ class TapeRecorder:
         dest_dir.mkdir(exist_ok=True)
         shutil.move(str(self._temp_path), str(self.tape_db_path))
 
-        logger.info(f"Tape successfully recorded on: {self.tape_db_path}")
+        logger.info(f"Catalog successfully recorded on: {self.tape_db_path}")
 
     def commit(self) -> str:
         """
@@ -70,7 +70,9 @@ class TapeRecorder:
 
             with self.db.atomic():
                 # ADR-001: Important for deterministic ordering
-                tracks = cast(Iterable[Track], Track.select().order_by(Track.arc_path))
+                tracks = cast(
+                    Iterable[Track], Track.select().order_by(Track.arc_path).iterator()
+                )
                 current_offset = 0
                 batch = []
 
