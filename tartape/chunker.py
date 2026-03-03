@@ -1,6 +1,6 @@
 import logging
 import math
-from typing import Generator, List, Optional, Tuple
+from typing import Generator, Iterable, List, Optional, Tuple, cast
 
 from tartape.catalog import Catalog
 from tartape.models import Track
@@ -45,11 +45,12 @@ class TarChunker:
             # Only the files that "touch" this byte window.
             # Overlap condition: The file starts before the volume ends,
             # And ends after the volume starts.
-            overlapping_tracks = (
+            overlapping_tracks = cast(
+                Iterable[Track],
                 Track.select()
                 .where((Track.start_offset < vol_end) & (Track.end_offset > vol_start))
                 .order_by(Track.start_offset)
-                .iterator()
+                .iterator(),
             )
 
             entries = []
@@ -81,6 +82,7 @@ class TarChunker:
                         state=state,
                         offset_in_volume=local_start,
                         bytes_in_volume=bytes_occupied,
+                        md5sum=track.md5sum,
                     )
                 )
 
@@ -99,8 +101,41 @@ class TarChunker:
         )
         return manifests
 
+    def _resolve_volume_name(
+        self,
+        root_name: str,
+        vol_index: int,
+        total_vols: int,
+        template: Optional[str] = None,
+    ) -> str:
+
+        default_template = "{name}_{fingerprint:.8}.tar.{pindex}"
+        actual_template = template or default_template
+
+        padding_width = max(3, len(str(total_vols)))
+        pindex = str(vol_index + 1).zfill(padding_width)
+        part_num = vol_index + 1
+
+        try:
+            return actual_template.format(
+                name=root_name,
+                fingerprint=self.fingerprint,
+                index=vol_index,  # 0, 1, 2...
+                pindex=pindex,  # 001, 002...
+                part=part_num,
+                total=total_vols,
+            )
+        except (KeyError, ValueError) as e:
+            logger.warning(f"Naming template error: {e}. Falling back to default.")
+            return default_template.format(
+                name=root_name, fingerprint=self.fingerprint, pindex=pindex
+            )
+
     def iter_volumes(
-        self, player: TapePlayer, plan: Optional[List[VolumeManifest]] = None
+        self,
+        player: TapePlayer,
+        plan: Optional[List[VolumeManifest]] = None,
+        naming_template=None,
     ) -> Generator[Tuple[TarVolume, VolumeManifest], None, None]:
         """
         Main iterator. Returns the File-Like Object (TarVolume) along with its Manifest.
@@ -109,8 +144,21 @@ class TarChunker:
         if plan is None:
             plan = self.generate_plan()
 
+        total_vols = len(plan)
+        root_name = player.directory.name
+
+        padding_width = max(3, len(str(total_vols)))
+        default_template = "{name}_{fingerprint:.8}.tar.{pindex}"
+        template = naming_template or default_template
+
         for manifest in plan:
-            net_name = f"{self.fingerprint}_vol_{manifest.volume_index}.tar"
+            net_name = self._resolve_volume_name(
+                root_name=root_name,
+                vol_index=manifest.volume_index,
+                total_vols=total_vols,
+                template=naming_template,
+            )
+
             volume = TarVolume(
                 player=player,
                 start_offset=manifest.start_offset,

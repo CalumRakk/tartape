@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import cast
+from typing import Optional, cast
 
 from peewee import (
     BooleanField,
@@ -30,6 +30,8 @@ class Track(BaseModel):
 
     arc_path = cast(str, CharField(primary_key=True))
     rel_path = cast(str, CharField())
+
+    md5sum = cast(Optional[str], CharField(null=True))
 
     # Tar Header
     size = cast(int, IntegerField())

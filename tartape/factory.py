@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import os
 import stat as stat_module
@@ -33,6 +34,15 @@ class TarEntryFactory:
     """
 
     @staticmethod
+    def calculate_md5(path: Path) -> str:
+        """Calculate the MD5 hash of a file in 64 KB blocks."""
+        hash_md5 = hashlib.md5()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(64 * 1024), b""):
+                hash_md5.update(chunk)
+        return hash_md5.hexdigest()
+
+    @staticmethod
     def inspect(path: Path) -> DiskEntryStats:
         """
         Single point of file inspection on the system.
@@ -51,11 +61,15 @@ class TarEntryFactory:
             # Securely extract usernames/group names
             uname, gname = "", ""
             if pwd:
-                try: uname = pwd.getpwuid(st.st_uid).pw_name # type: ignore
-                except (KeyError, AttributeError): uname = str(st.st_uid)
+                try:
+                    uname = pwd.getpwuid(st.st_uid).pw_name  # type: ignore
+                except (KeyError, AttributeError):
+                    uname = str(st.st_uid)
             if grp:
-                try: gname = grp.getgrgid(st.st_gid).gr_name # type: ignore
-                except (KeyError, AttributeError): gname = str(st.st_gid)
+                try:
+                    gname = grp.getgrgid(st.st_gid).gr_name  # type: ignore
+                except (KeyError, AttributeError):
+                    gname = str(st.st_gid)
 
             return DiskEntryStats(
                 exists=True,
@@ -69,11 +83,10 @@ class TarEntryFactory:
                 is_dir=is_dir,
                 is_file=is_file,
                 is_symlink=is_symlink,
-                linkname=os.readlink(path) if is_symlink else ""
+                linkname=os.readlink(path) if is_symlink else "",
             )
         except (FileNotFoundError, ProcessLookupError):
             return DiskEntryStats(exists=False)
-
 
     @classmethod
     def create_track(
@@ -82,6 +95,7 @@ class TarEntryFactory:
         rel_path: str,
         arcname: str,
         anonymize: bool = True,
+        calculate_hash: bool = False,
     ) -> Optional[Track]:
         """
         Analyzes a path and creates a TarEntry.
@@ -93,6 +107,7 @@ class TarEntryFactory:
             return None
 
         from tartape.header import TarHeader
+
         temp_track = Track(arc_path=arcname)
         TarHeader(temp_track)._split_path(arcname)
 
@@ -104,6 +119,10 @@ class TarEntryFactory:
             size = 0  # In TAR, symlinks have a size of 0
         elif stats.is_dir:
             size = 0  # Directories have a size of 0 in the TAR header
+
+        md5_value = None
+        if calculate_hash and stats.is_file:
+            md5_value = cls.calculate_md5(Path(source_path))
 
         return Track(
             arc_path=arcname,
@@ -118,4 +137,5 @@ class TarEntryFactory:
             gid=0 if anonymize else stats.gid,
             uname="root" if anonymize else stats.uname,
             gname="root" if anonymize else stats.gname,
+            md5sum=md5_value,
         )

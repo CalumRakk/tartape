@@ -22,8 +22,10 @@ class TapeRecorder:
         directory: str | Path,
         exclude: Optional[ExcludeType] = None,
         anonymize: bool = True,
+        calculate_hashes: bool = False,
     ):
         self.directory = Path(directory).resolve()
+        self.calculate_hashes = calculate_hashes
         if not self.directory.is_dir():
             raise ValueError(f"Root path '{directory}' must be a directory.")
 
@@ -140,7 +142,11 @@ class TapeRecorder:
             rel_path = ""
 
         track = TarEntryFactory.create_track(
-            source_path, arcname=arcname, rel_path=rel_path, anonymize=self.anonymize
+            source_path,
+            arcname=arcname,
+            rel_path=rel_path,
+            anonymize=self.anonymize,
+            calculate_hash=self.calculate_hashes,
         )
 
         if track:

@@ -28,15 +28,29 @@ class Tape:
         if self._catalog:
             self._catalog.close()
 
+    @property
+    def files(self):
+        self._open_catalog()
+        assert self._catalog, "Catalog is not open"
+        return self._catalog.get_tracks()
+
+    @property
+    def count_files(self) -> int:
+        """Returns the total number of files in the tape."""
+        self._open_catalog()
+        assert self._catalog, "Catalog is not open"
+        return int(self._catalog._query_metadata("count_files"))
+
     @classmethod
     def create(
         cls,
         directory: Union[str, Path],
         exclude: Optional[ExcludeType] = None,
         anonymize: bool = True,
+        calculate_hashes: bool = False,
     ) -> "Tape":
         """Record a new tape and return the Tape object."""
-        recorder = TapeRecorder(directory, exclude, anonymize)
+        recorder = TapeRecorder(directory, exclude, anonymize, calculate_hashes)
         recorder.commit()
         return cls(directory)
 
@@ -71,10 +85,10 @@ class Tape:
             player._spot_check()
 
     def iter_volumes(
-        self, size: int
+        self, size: int, naming_template: Optional[str] = None
     ) -> Generator[Tuple[TarVolume, VolumeManifest], None, None]:
         """It breaks the tape down into logical and physical volumes."""
         self._open_catalog()
         player = TapePlayer(self._catalog, self.path)  # type: ignore
         chunker = TarChunker(self._catalog, chunk_size=size)  # type: ignore
-        yield from chunker.iter_volumes(player)
+        yield from chunker.iter_volumes(player, naming_template=naming_template)
