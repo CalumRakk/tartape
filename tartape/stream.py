@@ -149,8 +149,12 @@ class TarStreamGenerator:
                     bytes_remaining -= len(chunk)
                     yield TarFileDataEvent(type="file_data", data=chunk)
 
-                    if local_skip == 0 and f.read(1):
-                        raise TarIntegrityError(f"File grew: '{entry.source_path}'")
+                if local_skip == 0:
+                    extra = f.read(1)
+                    if extra:
+                        raise TarIntegrityError(
+                            f"File grew: '{entry.source_path}'. Bytes left: {extra}"
+                        )
 
         except OSError as e:
             raise TarIntegrityError(f"Error leyendo {entry.source_path}") from e
