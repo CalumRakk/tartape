@@ -18,10 +18,10 @@ class EntryState(str, Enum):
 class ManifestEntry:
     arc_path: str
     state: EntryState
-    # Byte within THIS volume where the file data begins
     offset_in_volume: int
-    # How many bytes of this file physically reside in this volume
     bytes_in_volume: int
+    track_id: int
+    size: int
     md5sum: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -30,6 +30,8 @@ class ManifestEntry:
             "state": self.state.value,
             "offset_in_volume": self.offset_in_volume,
             "bytes_in_volume": self.bytes_in_volume,
+            "track_id": self.track_id,
+            "size": self.size,
             "md5sum": self.md5sum,
         }
 

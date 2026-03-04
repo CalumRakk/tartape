@@ -83,6 +83,8 @@ class TarChunker:
                         offset_in_volume=local_start,
                         bytes_in_volume=bytes_occupied,
                         md5sum=track.md5sum,
+                        size=track.size,
+                        track_id=track.id,
                     )
                 )
 

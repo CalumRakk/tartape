@@ -28,6 +28,7 @@ class TapeMetadata(BaseModel):
 class Track(BaseModel):
     """Represents a file/folder on the tape"""
 
+    id: int
     arc_path = cast(str, CharField(primary_key=True))
     rel_path = cast(str, CharField())
 

@@ -3,6 +3,7 @@ from typing import Generator, Optional, Tuple, Union
 
 from tartape.catalog import Catalog
 from tartape.chunker import TarChunker
+from tartape.exceptions import TarIntegrityError
 from tartape.factory import ExcludeType
 from tartape.player import TapePlayer
 from tartape.recorder import TapeRecorder
@@ -41,6 +42,22 @@ class Tape:
         assert self._catalog, "Catalog is not open"
         return int(self._catalog._query_metadata("count_files"))
 
+    @property
+    def fingerprint(self) -> str:
+        self._open_catalog()
+        return self._catalog.fingerprint  # type: ignore
+
+    @property
+    def total_size(self) -> int:
+        self._open_catalog()
+        return self._catalog.total_size  # type: ignore
+
+    @property
+    def created_at(self) -> int:
+        self._open_catalog()
+        assert self._catalog, "Catalog is not open"
+        return int(self._catalog._query_metadata("created_at"))
+
     @classmethod
     def create(
         cls,
@@ -61,28 +78,33 @@ class Tape:
             raise FileNotFoundError(f"The tape does not exist in: {path}")
         return cls(path)
 
+    @classmethod
+    def exists(cls, path: Union[str, Path]) -> bool:
+        try:
+            Catalog.discover(path)
+            return True
+        except FileNotFoundError:
+            return False
+
     def _open_catalog(self):
         if not self._catalog:
             self._catalog = Catalog.discover(self.path)
 
-    @property
-    def fingerprint(self) -> str:
-        self._open_catalog()
-        return self._catalog.fingerprint  # type: ignore
-
-    @property
-    def total_size(self) -> int:
-        self._open_catalog()
-        return self._catalog.total_size  # type: ignore
-
-    def verify(self, deep: bool = False):
+    def verify(self, deep: bool = False, raise_exception: bool = True):
         """Verify the physical integrity of the disc against the catalog."""
         self._open_catalog()
         player = TapePlayer(self._catalog, self.path)  # type: ignore
-        if deep:
-            player._verify()
-        else:
-            player._spot_check()
+
+        try:
+            if deep:
+                player._verify()
+            else:
+                player._spot_check()
+            return True
+        except TarIntegrityError:
+            if raise_exception:
+                raise
+            return False
 
     def iter_volumes(
         self, size: int, naming_template: Optional[str] = None

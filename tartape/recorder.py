@@ -3,6 +3,7 @@ import logging
 import os
 import shutil
 import tempfile
+import time
 from pathlib import Path
 from typing import Iterable, Optional, cast
 
@@ -95,11 +96,13 @@ class TapeRecorder:
                     )
                     batch = []
 
-                total_size = current_offset + TAR_FOOTER_SIZE
+                total_size = int(current_offset + TAR_FOOTER_SIZE)
                 fingerprint = self._calculate_fingerprint()
+                capture_time = str(int(time.time()))
 
                 TapeMetadata.insert(key="fingerprint", value=fingerprint).execute()
-                TapeMetadata.insert(key="total_size", value=str(total_size)).execute()
+                TapeMetadata.insert(key="total_size", value=total_size).execute()
+                TapeMetadata.insert(key="created_at", value=capture_time).execute()
 
             self.temp_session.close()
             self._finalize_storage()
