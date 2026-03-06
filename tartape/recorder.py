@@ -1,4 +1,5 @@
 import hashlib
+import json
 import logging
 import os
 import shutil
@@ -96,6 +97,12 @@ class TapeRecorder:
                     )
                     batch = []
 
+                if callable(self.exclude):
+                    func_name = getattr(self.exclude, "__name__", "custom_filter")
+                    exclude_val = f"<dynamic_callable: {func_name}>"
+                else:
+                    exclude_val = json.dumps(self.exclude)
+
                 total_size = int(current_offset + TAR_FOOTER_SIZE)
                 fingerprint = self._calculate_fingerprint()
                 capture_time = str(int(time.time()))
@@ -103,6 +110,7 @@ class TapeRecorder:
                 TapeMetadata.insert(key="fingerprint", value=fingerprint).execute()
                 TapeMetadata.insert(key="total_size", value=total_size).execute()
                 TapeMetadata.insert(key="created_at", value=capture_time).execute()
+                TapeMetadata.insert(key="exclude_patterns", value=exclude_val).execute()
 
             self.temp_session.close()
             self._finalize_storage()

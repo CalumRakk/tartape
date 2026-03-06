@@ -22,17 +22,20 @@ class Catalog:
         self.path = Path(db_path)
         self.db_session = DatabaseSession(self.path)
 
-    def _query_metadata(self, key: str) -> str:
-        already_open = not self.db_session.db.is_closed()
-        if not already_open:
-            self.db_session.connect()
+    @property
+    def fingerprint(self) -> str:
+        """Returns the digital signature of the tape."""
+        return self._query_metadata("fingerprint")
 
-        try:
-            return TapeMetadata.get(TapeMetadata.key == key).value
-        finally:
-            # We only close if we were the ones who opened it
-            if not already_open:
-                self.db_session.close()
+    @property
+    def total_size(self) -> int:
+        """Returns the total size that the TAR stream will have (bytes)."""
+        return int(self._query_metadata("total_size"))
+
+    @property
+    def count_files(self) -> int:
+        """Returns the total number of files in the tape."""
+        return Track.select().count()
 
     @classmethod
     def open(cls, path: str | Path) -> "Catalog":
@@ -63,16 +66,6 @@ class Catalog:
 
         raise FileNotFoundError(f"No tape found in: {candidate}")
 
-    @property
-    def fingerprint(self) -> str:
-        """Returns the digital signature of the tape."""
-        return self._query_metadata("fingerprint")
-
-    @property
-    def total_size(self) -> int:
-        """Returns the total size that the TAR stream will have (bytes)."""
-        return int(self._query_metadata("total_size"))
-
     def get_tracks(self) -> Iterable[Track]:
         """Returns all tracks sorted for the stream."""
         return Track.select().order_by(Track.arc_path).iterator()
@@ -87,3 +80,15 @@ class Catalog:
     def __enter__(self):
         self.db_session.connect()
         return self
+
+    def _query_metadata(self, key: str) -> str:
+        already_open = not self.db_session.db.is_closed()
+        if not already_open:
+            self.db_session.connect()
+
+        try:
+            return TapeMetadata.get(TapeMetadata.key == key).value
+        finally:
+            # We only close if we were the ones who opened it
+            if not already_open:
+                self.db_session.close()

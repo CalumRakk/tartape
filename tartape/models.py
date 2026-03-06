@@ -43,7 +43,7 @@ class Track(BaseModel):
     uname = cast(str, CharField())
     gname = cast(str, CharField())
 
-    is_dir = BooleanField(default=False)
+    is_dir = cast(bool, BooleanField(default=False))
     is_symlink = BooleanField(default=False)
     linkname = cast(str, CharField(null=True))
 

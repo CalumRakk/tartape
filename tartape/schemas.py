@@ -22,6 +22,7 @@ class ManifestEntry:
     bytes_in_volume: int
     track_id: int
     size: int
+    is_dir: bool
     md5sum: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -32,6 +33,7 @@ class ManifestEntry:
             "bytes_in_volume": self.bytes_in_volume,
             "track_id": self.track_id,
             "size": self.size,
+            "is_dir": self.is_dir,
             "md5sum": self.md5sum,
         }
 

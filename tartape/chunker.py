@@ -85,6 +85,7 @@ class TarChunker:
                         md5sum=track.md5sum,
                         size=track.size,
                         track_id=track.id,
+                        is_dir=track.is_dir,
                     )
                 )
 

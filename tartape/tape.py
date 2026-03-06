@@ -1,8 +1,11 @@
+import json
+import shutil
 from pathlib import Path
-from typing import Generator, Optional, Tuple, Union
+from typing import Generator, List, Optional, Tuple, Union
 
 from tartape.catalog import Catalog
 from tartape.chunker import TarChunker
+from tartape.constants import TAPE_METADATA_DIR
 from tartape.exceptions import TarIntegrityError
 from tartape.factory import ExcludeType
 from tartape.player import TapePlayer
@@ -32,31 +35,37 @@ class Tape:
     @property
     def files(self):
         self._open_catalog()
-        assert self._catalog, "Catalog is not open"
-        return self._catalog.get_tracks()
+        return self._catalog.get_tracks()  # type: ignore
 
     @property
     def count_files(self) -> int:
         """Returns the total number of files in the tape."""
         self._open_catalog()
-        assert self._catalog, "Catalog is not open"
-        return int(self._catalog._query_metadata("count_files"))
+        return self._catalog.count_files  # type: ignore
 
     @property
     def fingerprint(self) -> str:
         self._open_catalog()
-        return self._catalog.fingerprint  # type: ignore
+        return self._catalog._query_metadata("fingerprint")  # type: ignore
 
     @property
     def total_size(self) -> int:
         self._open_catalog()
-        return self._catalog.total_size  # type: ignore
+        return int(self._catalog._query_metadata("total_size"))  # type: ignore
 
     @property
     def created_at(self) -> int:
         self._open_catalog()
-        assert self._catalog, "Catalog is not open"
-        return int(self._catalog._query_metadata("created_at"))
+        return int(self._catalog._query_metadata("created_at"))  # type: ignore
+
+    @property
+    def exclude_patterns(self) -> List[str] | str:
+        self._open_catalog()
+        value = self._catalog._query_metadata("exclude_patterns")  # type: ignore
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value
 
     @classmethod
     def create(
@@ -86,12 +95,21 @@ class Tape:
         except FileNotFoundError:
             return False
 
+    def destroy(self):
+        if self._catalog:
+            self._catalog.close()
+            self._catalog = None
+
+        metadata_dir = self.path / TAPE_METADATA_DIR
+        if metadata_dir.exists():
+            shutil.rmtree(metadata_dir)
+
     def _open_catalog(self):
         if not self._catalog:
             self._catalog = Catalog.discover(self.path)
 
-    def verify(self, deep: bool = False, raise_exception: bool = True):
-        """Verify the physical integrity of the disc against the catalog."""
+    def verify(self, deep: bool = False, raise_exception: bool = False):
+        """Returns True if the tape is valid."""
         self._open_catalog()
         player = TapePlayer(self._catalog, self.path)  # type: ignore
 
@@ -114,3 +132,15 @@ class Tape:
         player = TapePlayer(self._catalog, self.path)  # type: ignore
         chunker = TarChunker(self._catalog, chunk_size=size)  # type: ignore
         yield from chunker.iter_volumes(player, naming_template=naming_template)
+
+    def play(
+        self,
+        start_offset: int = 0,
+        chunk_size: int = 64 * 1024,
+        fast_verify: bool = True,
+    ) -> Generator:
+        self._open_catalog()
+        player = TapePlayer(self._catalog, self.path)  # type: ignore
+        return player.play(
+            start_offset=start_offset, chunk_size=chunk_size, fast_verify=fast_verify
+        )
