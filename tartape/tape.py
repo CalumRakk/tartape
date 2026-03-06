@@ -11,7 +11,7 @@ from tartape.factory import ExcludeType
 from tartape.player import TapePlayer
 from tartape.recorder import TapeRecorder
 from tartape.schemas import VolumeManifest
-from tartape.volume import TarVolume
+from tartape.stream import FileVolume, FolderVolume, TapeVolume
 
 
 class Tape:
@@ -126,7 +126,7 @@ class Tape:
 
     def iter_volumes(
         self, size: int, naming_template: Optional[str] = None
-    ) -> Generator[Tuple[TarVolume, VolumeManifest], None, None]:
+    ) -> Generator[Tuple[TapeVolume, VolumeManifest], None, None]:
         """It breaks the tape down into logical and physical volumes."""
         self._open_catalog()
         player = TapePlayer(self._catalog, self.path)  # type: ignore
@@ -144,3 +144,20 @@ class Tape:
         return player.play(
             start_offset=start_offset, chunk_size=chunk_size, fast_verify=fast_verify
         )
+
+    @classmethod
+    def get_volume(
+        cls, path: str | Path, start: int, end: int, name: Optional[str] = None
+    ) -> TapeVolume:
+        path = Path(path)
+        vol_name = name or path.name
+
+        if cls.exists(path):
+            t = cls.open(path)
+            player = TapePlayer(t._catalog, t.path)  # type: ignore
+            return FolderVolume(player, start, end, vol_name)
+
+        if path.is_file():
+            return FileVolume(path, start, end, vol_name)
+
+        raise ValueError("The path must be a file or a directory (Tape).")
