@@ -1,7 +1,7 @@
 import io
 import tarfile
 
-from tartape.catalog import Catalog
+import tartape
 from tartape.chunker import TarChunker
 from tartape.player import TapePlayer
 from tartape.recorder import TapeRecorder
@@ -21,23 +21,26 @@ class TestChunkingIntegration(TarTapeTestCase):
         recorder = TapeRecorder(self.data_dir)
         recorder.commit()
 
-        with Catalog.discover(self.data_dir) as tape:
-            player = TapePlayer(tape, self.data_dir)
+        cat = tartape.get_catalog(self.data_dir)
+        with cat:
+            player = TapePlayer(self.data_dir)
             # Planifica trozos pequeños 2048 bytes
-            chunker = TarChunker(tape, chunk_size=2048)
+            chunker = TarChunker(chunk_size=2048)
 
             full_reconstructed_content = bytearray()
 
             # "Transmite" los volúmenes y guardamos los bytes en memoria
             for volume, manifest in chunker.iter_volumes(player):
-                content = volume.read()
-                self.assertTrue(volume.is_completed)
-                self.assertIsNotNone(volume.md5sum)
+                with volume:
+                    content = volume.read()
+                    self.assertTrue(volume.is_completed)
+                    self.assertIsNotNone(volume.md5sum)
 
-                full_reconstructed_content.extend(content)
+                    full_reconstructed_content.extend(content)
 
             # Validamos que los datos transmitidos sean igual al peso total calculado.
-            self.assertEqual(len(full_reconstructed_content), tape.total_size)
+            data = cat.get_metadata_snapshot()
+            self.assertEqual(len(full_reconstructed_content), int(data["total_size"]))
 
             # Abrimos nuestros datos transmitidos como un archivo usando la libreria estandar de python.
             tar_fileobj = io.BytesIO(full_reconstructed_content)
@@ -57,8 +60,9 @@ class TestChunkingIntegration(TarTapeTestCase):
         self.create_file("data.bin", "A" * 10000)
         TapeRecorder(self.data_dir).commit()
 
-        with Catalog.discover(self.data_dir) as tape:
-            chunker = TarChunker(tape, chunk_size=1024)
+        cat = tartape.get_catalog(self.data_dir)
+        with cat:
+            chunker = TarChunker(chunk_size=1024)
             plan1 = chunker.generate_plan()
             plan2 = chunker.generate_plan()
 

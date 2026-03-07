@@ -1,10 +1,9 @@
 import os
 import time
 
-from tartape.catalog import Catalog
 from tartape.exceptions import TarIntegrityError
-from tartape.player import TapePlayer
 from tartape.recorder import TapeRecorder
+from tartape.tape import Tape
 from tests.base import TarTapeTestCase
 
 
@@ -19,11 +18,10 @@ class TestIntegritySafeguards(TarTapeTestCase):
         # Mutación T1
         os.utime(f, (time.time() + 1000, time.time() + 1000))
 
-        with Catalog.discover(self.data_dir) as tape:
-            player = TapePlayer(tape, self.data_dir)
-            with self.assertRaisesRegex(TarIntegrityError, "File modified"):
-                for _ in player.play(fast_verify=False):
-                    pass
+        tape = Tape(self.data_dir)
+        with self.assertRaisesRegex(TarIntegrityError, "File modified"):
+            for _ in tape.play(fast_verify=False):
+                pass
 
     def test_mtime_mutation_aborts_stream(self):
         """ADR-002: Si el mtime cambia después del T0, el stream debe fallar."""
@@ -37,11 +35,9 @@ class TestIntegritySafeguards(TarTapeTestCase):
         # Mutación: Cambiamos mtime al futuro
         os.utime(f, (time.time() + 100, time.time() + 100))
 
-        tape = Catalog.discover(self.data_dir)
-        player = TapePlayer(tape, directory=self.data_dir)
-
+        tape = Tape(self.data_dir)
         with self.assertRaisesRegex(TarIntegrityError, "File modified"):
-            for _ in player.play(fast_verify=False):
+            for _ in tape.play(fast_verify=False):
                 pass
 
     def test_size_mutation_aborts_stream(self):
@@ -53,9 +49,9 @@ class TestIntegritySafeguards(TarTapeTestCase):
 
         f.write_text("original plus more")
 
-        tape = Catalog.discover(self.data_dir)
+        tape = Tape(self.data_dir)
         with self.assertRaisesRegex(TarIntegrityError, "File size changed"):
-            for _ in TapePlayer(tape, self.data_dir).play(fast_verify=False):
+            for _ in tape.play(fast_verify=False):
                 pass
 
     def test_identity_anonymization(self):
@@ -64,11 +60,11 @@ class TestIntegritySafeguards(TarTapeTestCase):
 
         recorder = TapeRecorder(self.data_dir, anonymize=True)
         recorder.commit()
+        tape = Tape(self.data_dir)
 
-        with Catalog.discover(self.data_dir) as tape:
-            track = list(tape.get_tracks())[1]
+        track = list(tape.get_tracks())[1]
 
-            self.assertEqual(track.uid, 0)
-            self.assertEqual(track.uname, "root")
-            self.assertEqual(track.gid, 0)
-            self.assertEqual(track.gname, "root")
+        self.assertEqual(track.uid, 0)
+        self.assertEqual(track.uname, "root")
+        self.assertEqual(track.gid, 0)
+        self.assertEqual(track.gname, "root")

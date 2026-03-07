@@ -15,9 +15,18 @@ class TarTapeTestCase(unittest.TestCase):
         self.data_dir.mkdir()
 
     def tearDown(self):
+        import gc
+
+        gc.collect()
 
         if self.tmp.exists():
-            shutil.rmtree(self.tmp)
+            try:
+                shutil.rmtree(self.tmp)
+            except PermissionError:
+                import time
+
+                time.sleep(0.1)
+                shutil.rmtree(self.tmp)
 
     def create_file(self, rel_path: str, content: str = "data"):
         p = self.data_dir / rel_path

@@ -117,7 +117,8 @@ class TapeRecorder:
             return fingerprint
 
         finally:
-            self.temp_session.close()
+            if hasattr(self, "temp_session"):
+                self.temp_session.close()
             self._temp_dir.cleanup()
 
     def _run_discovery(self):

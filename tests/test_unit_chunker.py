@@ -10,7 +10,7 @@ class TestChunkerLogic(TarTapeTestCase):
     def test_fragmentation_states(self):
         """Verifica que el Chunker identifique correctamente HEAD, BODY, TAIL y COMPLETE."""
 
-        with Catalog(":memory:") as tape:
+        with Catalog(":memory:"):
             TapeMetadata.create(key="fingerprint", value="hash123")
             TapeMetadata.create(key="total_size", value="200")
 
@@ -31,7 +31,7 @@ class TestChunkerLogic(TarTapeTestCase):
                 is_symlink=False,
             )
 
-            chunker = TarChunker(tape, chunk_size=50)
+            chunker = TarChunker(chunk_size=50)
             plan = chunker.generate_plan()
 
             # Vol 0: [0-50). El archivo empieza en 10 y termina en 110.
@@ -55,7 +55,7 @@ class TestChunkerLogic(TarTapeTestCase):
 
     def test_chunk_size_alignment(self):
         """Verifica que un archivo pequeño quepa exacto como COMPLETE."""
-        with Catalog(":memory:") as tape:
+        with Catalog(":memory:"):
             TapeMetadata.create(key="fingerprint", value="small_test")
             TapeMetadata.create(key="total_size", value="100")
 
@@ -73,7 +73,7 @@ class TestChunkerLogic(TarTapeTestCase):
                 gname="root",
             )
 
-            chunker = TarChunker(tape, chunk_size=100)
+            chunker = TarChunker(chunk_size=100)
             plan = chunker.generate_plan()
 
             self.assertEqual(len(plan), 1)

@@ -1,26 +1,31 @@
 import logging
 from pathlib import Path
-from typing import Generator, Iterable, cast
+from typing import Generator, Iterable, List, cast
 
-from tartape.catalog import Catalog
+import peewee
+
+from tartape.models import TapeMetadata, Track
 from tartape.schemas import TarEvent
 from tartape.stream import TarStreamGenerator
-
-from .models import Track
 
 logger = logging.getLogger(__name__)
 
 
 class TapePlayer:
-    def __init__(self, tape: Catalog, directory: str | Path):
-        self.tape = tape
+    def __init__(self, directory: str | Path):
         self.directory = Path(directory).absolute()
+
+    @property
+    def total_size(self) -> int:
+        return int(TapeMetadata.get(TapeMetadata.key == "total_size").value)
 
     def _verify(self) -> bool:
         """Compare the signature recorded (saved) on the tape with that of the current disk."""
         logger.info("Starting full integrity verification...")
 
-        for track in self.tape.get_tracks():
+        for track in cast(
+            Iterable[Track], Track.select().order_by(Track.arc_path).iterator()
+        ):
             track.validate_integrity(self.directory)
 
         logger.info("Full integrity check PASSED.")
@@ -37,10 +42,12 @@ class TapePlayer:
             return
 
         current_sample_size = min(sample_size, total_tracks)
-        import peewee
 
         # SQLite to give us N random records
-        samples = Track.select().order_by(peewee.fn.Random()).limit(current_sample_size)
+        samples = cast(
+            List[Track],
+            Track.select().order_by(peewee.fn.Random()).limit(current_sample_size),
+        )
 
         logger.info(f"Performing spot check on {current_sample_size} random files...")
 
@@ -58,13 +65,13 @@ class TapePlayer:
         if offset < 0:
             raise ValueError(f"Offset cannot be negative: {offset}")
 
-        if offset >= self.tape.total_size:
+        if offset >= self.total_size:
             raise ValueError(
-                f"Offset {offset} is beyond the total tape size ({self.tape.total_size})"
+                f"Offset {offset} is beyond the total tape size ({self.total_size})"
             )
 
         # If the offset falls here, there is no file to validate, it's just zeros.
-        if offset >= self.tape.total_size - 1024:
+        if offset >= self.total_size - 1024:
             logger.info(
                 f"Resume point at {offset} falls into the TAR footer. No file validation needed."
             )
@@ -90,32 +97,31 @@ class TapePlayer:
     ) -> Generator[TarEvent, None, None]:
         logger.debug("Starting tape playback...")
 
-        with self.tape:
-            if fast_verify:
-                self._spot_check(sample_size=15)
-            else:
-                self._verify()
+        if fast_verify:
+            self._spot_check(sample_size=15)
+        else:
+            self._verify()
 
-            if start_offset > 0:
-                logger.info(f"Resuming stream from offset: {start_offset} bytes")
-                self._verify_resume_point(start_offset)
+        if start_offset > 0:
+            logger.info(f"Resuming stream from offset: {start_offset} bytes")
+            self._verify_resume_point(start_offset)
 
-            # Find those whose 'end_offset' is greater than our starting point
-            query = cast(
-                Iterable[Track],
-                Track.select()
-                .where(Track.end_offset > start_offset)
-                .order_by(Track.arc_path)
-                .iterator(),
-            )
+        # Find those whose 'end_offset' is greater than our starting point
+        query = cast(
+            Iterable[Track],
+            Track.select()
+            .where(Track.end_offset > start_offset)
+            .order_by(Track.arc_path)
+            .iterator(),
+        )
 
-            def track_to_entry_gen():
-                for track in query:
-                    track.source_path = self.directory
-                    yield track
+        def track_to_entry_gen():
+            for track in query:
+                track.source_path = self.directory
+                yield track
 
-            engine = TarStreamGenerator(track_to_entry_gen(), self.directory)
-            yield from engine.stream(start_offset=start_offset, chunk_size=chunk_size)
+        engine = TarStreamGenerator(track_to_entry_gen(), self.directory)
+        yield from engine.stream(start_offset=start_offset, chunk_size=chunk_size)
 
     def get_offset_of(self, arc_path: str) -> int:
         track = Track.get(Track.arc_path == arc_path)

@@ -15,13 +15,14 @@ class DatabaseSession:
             str(self.db_path),
             pragmas={
                 "journal_mode": "wal",
-                "cache_size": -1024 * 64,      # 64MB cache
+                "cache_size": -1024 * 64,  # 64MB cache
                 "foreign_keys": 1,
                 "synchronous": "NORMAL",
             },
             timeout=10,
         )
-        from tartape.models import Track, TapeMetadata
+        from tartape.models import TapeMetadata, Track
+
         self._models = [Track, TapeMetadata]
         # 'bind' Ignore what your Meta.database (the proxy) says and use ME directly
         self.db.bind(self._models, bind_refs=True, bind_backrefs=True)

@@ -2,8 +2,7 @@ import logging
 import math
 from typing import Generator, Iterable, List, Optional, Tuple, cast
 
-from tartape.catalog import Catalog
-from tartape.models import Track
+from tartape.models import TapeMetadata, Track
 from tartape.player import TapePlayer
 from tartape.schemas import EntryState, ManifestEntry, VolumeManifest
 from tartape.stream import FolderVolume, TapeVolume
@@ -18,14 +17,18 @@ class TarChunker:
     generates adapters (TarVolume) ready for network transmission.
     """
 
-    def __init__(self, tape: Catalog, chunk_size: int):
+    def __init__(self, chunk_size: int):
         if chunk_size <= 0:
             raise ValueError("The volume size (chunk_size) must be greater than 0.")
-
-        self.tape = tape
         self.chunk_size = chunk_size
-        self.fingerprint = self.tape.fingerprint
-        self.total_size = self.tape.total_size
+
+    @property
+    def fingerprint(self) -> str:
+        return TapeMetadata.get(TapeMetadata.key == "fingerprint").value
+
+    @property
+    def total_size(self) -> int:
+        return int(TapeMetadata.get(TapeMetadata.key == "total_size").value)
 
     def generate_plan(self) -> List[VolumeManifest]:
         """
@@ -163,7 +166,7 @@ class TarChunker:
             )
 
             volume = FolderVolume(
-                player=player,
+                directory=player.directory,
                 start_offset=manifest.start_offset,
                 end_offset=manifest.end_offset,
                 name=net_name,

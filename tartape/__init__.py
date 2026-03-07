@@ -1,29 +1,73 @@
 __version__ = "2.2.0b"
 __copyright__ = "Copyright (C) 2026-present CalumRakk <https://github.com/CalumRakk>"
 
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
+from tartape.catalog import Catalog
+from tartape.constants import TAPE_DB_NAME, TAPE_METADATA_DIR
 from tartape.factory import ExcludeType
+from tartape.recorder import TapeRecorder
 
 from .tape import Tape
 
 
-def open(path: str | Path) -> Tape:
-    return Tape.open(path)
-
-
 def create(
-    path: str | Path,
+    directory: str | Path,
     exclude: Optional[ExcludeType] = None,
     anonymize: bool = True,
     calculate_hashes: bool = False,
 ) -> Tape:
-    return Tape.create(path, exclude, anonymize, calculate_hashes)
+    """Record a new tape and return the Tape object."""
+    if not Path(directory).is_dir():
+        raise ValueError(f"Root directory '{directory}' must be a directory.")
+    recorder = TapeRecorder(directory, exclude, anonymize, calculate_hashes)
+    recorder.commit()
+    return Tape(directory)
 
 
-def exists(path: str | Path) -> bool:
-    return Tape.exists(path)
+def discover(directory: str | Path) -> Optional[Path]:
+    """
+    Automatically searches for a .tartape file in the given directory.
+    """
+    target_dir = Path(directory)
+    if not target_dir.is_dir():
+        raise NotADirectoryError(f"{directory} is not a valid directory.")
+
+    candidate = target_dir / TAPE_METADATA_DIR / TAPE_DB_NAME
+    if candidate.exists() and candidate.is_file():
+        return candidate
+
+    return None
 
 
-__all__ = ["Tape", "open", "create"]
+def exists(directory: str | Path) -> bool:
+    """
+    Automatically searches for a .tartape file in the given directory.
+    """
+    if discover(directory):
+        return True
+    return False
+
+
+def get_catalog(directory: str | Path) -> Catalog:
+    if not exists(directory):
+        raise FileNotFoundError(f"The tape does not exist in: {directory}")
+
+    db_path = discover(directory)
+    assert db_path is not None, "Could not find database file"
+    return Catalog(db_path)
+
+
+@contextmanager
+def open_volume(path: str | Path, start: int, end: int, name: Optional[str] = None):
+    name = name or Path(path).name
+    if exists(path):
+        tape = Tape(path)
+        volumen = tape.get_volume(start, end, name)
+        with volumen as v:
+            yield v
+
+
+__all__ = ["Tape", "create", "discover", "exists", "get_catalog", "open_volume"]

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Generator, Iterable, Optional
 if TYPE_CHECKING:
     from tartape.player import TapePlayer
 
+import tartape
 from tartape.exceptions import TarIntegrityError
 from tartape.header import TarHeader
 
@@ -32,6 +33,10 @@ class TapeVolume(io.BufferedIOBase):
 
     @property
     def md5sum(self) -> str:
+        raise NotImplementedError
+
+    @property
+    def is_completed(self) -> bool:
         raise NotImplementedError
 
 
@@ -199,53 +204,29 @@ class TarStreamGenerator:
 
 
 class FolderVolume(TapeVolume):
-
-    def __init__(
-        self, player: "TapePlayer", start_offset: int, end_offset: int, name: str
-    ):
-        """
-        Args:
-            player: Instance of TapePlayer.
-            start_offset: Starting byte (inclusive).
-            end_offset: Ending byte (exclusive).
-            name: Optional name for the file (e.g., 'backup_part_1.tar').
-        """
-        super().__init__(name, start_offset - end_offset)
-
-        self.player = player
+    def __init__(self, directory: Path, start_offset: int, end_offset: int, name: str):
+        super().__init__(name, end_offset - start_offset)
+        self.directory = directory
         self.start_offset = start_offset
         self.end_offset = end_offset
-        self.total_tape_size = self.player.tape.total_size
-
-        # Range integrity validations
-        if start_offset < 0:
-            raise ValueError("The initial offset cannot be negative.")
-
-        if end_offset <= start_offset:
-            raise ValueError(
-                "The final offset must be greater than the initial offset."
-            )
-
-        if end_offset > self.total_tape_size:
-            raise ValueError(
-                f"Limit exceeded: The end_offset ({end_offset}) is greater than "
-                f"the total tape size ({self.total_tape_size})."
-            )
-
         self.size = end_offset - start_offset
-        self.name = name or f"vol_{start_offset}.tar"
 
-        # Reading status
+        # State
+        self._catalog = None
+        self._player = None
+        self._stream_gen = None
         self._position = 0
         self._buffer = bytearray()
-        self._stream_gen = None
+        self._closed = True
 
         # Hash Status
         self._md5 = hashlib.md5()
         self._hash_cursor = 0
-        self._md5_invalid = False  # Jump flag (seek) detected
+        self._md5_invalid = False
 
-        self._init_stream(offset_in_volume=0)
+    def _ensure_not_closed(self):
+        if self._closed:
+            raise ValueError("I/O operation on closed volume.")
 
     def _init_stream(self, offset_in_volume: int):
         self._position = offset_in_volume
@@ -262,7 +243,9 @@ class FolderVolume(TapeVolume):
                 self._md5_invalid = True
 
         global_target = self.start_offset + offset_in_volume
-        self._stream_gen = self.player.play(start_offset=global_target)
+        if not self._player:
+            raise RuntimeError("Tape player not initialized.")
+        self._stream_gen = self._player.play(start_offset=global_target)
 
     @property
     def md5sum(self) -> str:
@@ -281,7 +264,33 @@ class FolderVolume(TapeVolume):
     def is_completed(self) -> bool:
         return self._position == self.size
 
+    def __enter__(self):
+        from tartape.player import TapePlayer
+
+        if not self._closed:
+            return self
+
+        self._catalog = tartape.get_catalog(self.directory)
+        self._catalog.open()
+        self._player = TapePlayer(self.directory)
+        self._closed = False
+        self._init_stream(0)
+        return self
+
+    def __exit__(self, *args):
+
+        self._catalog.close()  # type: ignore
+        self._closed = True
+        self._stream_gen = None
+
+    def open(self):
+        self.__enter__()
+
+    def close(self):
+        self.__exit__(None, None, None)
+
     def read(self, size: int = -1) -> bytes:  # type: ignore
+        self._ensure_not_closed()
         if self._position >= self.size:
             return b""
 
@@ -319,6 +328,7 @@ class FolderVolume(TapeVolume):
         """
         Supports jumping to the beginning (rewind) and the end (so that libraries like requests can calculate the Content-Length).
         """
+        self._ensure_not_closed()
         target = 0
         if whence == io.SEEK_SET:
             target = offset
@@ -346,6 +356,7 @@ class FolderVolume(TapeVolume):
         return self._position
 
     def tell(self) -> int:
+        self._ensure_not_closed()
         return self._position
 
     def seekable(self) -> bool:
@@ -357,22 +368,22 @@ class FolderVolume(TapeVolume):
 
 class FileVolume(TapeVolume):
     def __init__(self, path: Path, start_offset: int, end_offset: int, name: str):
-        super().__init__(name, start_offset - end_offset)
-
-        if start_offset < 0 or end_offset < start_offset:
-            raise ValueError(
-                "Offsets invalidos: start_offset < 0 o end_offset < start_offset"
-            )
-
+        super().__init__(name, end_offset - start_offset)
         self.path = path
         self.start_offset = start_offset
         self.end_offset = end_offset
-        self._file = open(path, "rb")
-        self._file.seek(start_offset)
-
+        self._file = None
         self._position = 0
         self._md5 = hashlib.md5()
-        self._closed = False
+        self._closed = True
+
+    @property
+    def is_completed(self) -> bool:
+        return self._position == self.size
+
+    def _ensure_not_closed(self):
+        if self._closed:
+            raise ValueError("I/O operation on closed file volume.")
 
     def read(self, size: int = -1) -> bytes:  # type: ignore
         if self._closed:
@@ -384,6 +395,8 @@ class FileVolume(TapeVolume):
 
         # Determinar cuánto leer (size=-1 significa todo)
         bytes_to_read = remaining if (size < 0) else min(size, remaining)
+        if not self._file:
+            raise RuntimeError("File not opened")
 
         chunk = self._file.read(bytes_to_read)
         if not chunk:
@@ -408,6 +421,8 @@ class FileVolume(TapeVolume):
             raise ValueError("Seek out of bounds")
 
         self._position = new_pos
+        if not self._file:
+            raise RuntimeError("File not opened")
         self._file.seek(self.start_offset + new_pos)
         return self._position
 
@@ -429,12 +444,19 @@ class FileVolume(TapeVolume):
         return self._md5.hexdigest()
 
     def close(self):
-        if not self._closed:
-            self._file.close()
-            self._closed = True
+        self.__exit__(None, None, None)
+
+    def open(self):
+        self.__enter__()
 
     def __enter__(self):
+        if self._closed:
+            self._file = open(self.path, "rb")
+            self._file.seek(self.start_offset)
+            self._closed = False
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
+        if not self._closed and self._file:
+            self._file.close()
+            self._closed = True

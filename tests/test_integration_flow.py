@@ -3,11 +3,10 @@ import os
 import tarfile
 import time
 
-from tartape.catalog import Catalog
 from tartape.exceptions import TarIntegrityError
-from tartape.player import TapePlayer
 from tartape.recorder import TapeRecorder
 from tartape.schemas import TarFileDataEvent
+from tartape.tape import Tape
 from tests.base import TarTapeTestCase
 
 
@@ -23,13 +22,11 @@ class TestFlow(TarTapeTestCase):
         self.assertIsNotNone(fingerprint)
 
         # Reproducción y Captura del Stream
-        with Catalog.discover(self.data_dir) as tape:
-            player = TapePlayer(tape, directory=self.data_dir)
-
-            tar_buffer = io.BytesIO()
-            for event in player.play(fast_verify=False):
-                if isinstance(event, TarFileDataEvent):
-                    tar_buffer.write(event.data)
+        tape = Tape(self.data_dir)
+        tar_buffer = io.BytesIO()
+        for event in tape.play(fast_verify=False):
+            if isinstance(event, TarFileDataEvent):
+                tar_buffer.write(event.data)
 
         tar_buffer.seek(0)
         with tarfile.open(fileobj=tar_buffer, mode="r:") as tf:
@@ -51,11 +48,6 @@ class TestFlow(TarTapeTestCase):
             assert f is not None, "El archivo no se pudo extraer"
             self.assertEqual(f.read().decode(), "contenido anidado")
 
-    def test_tape_discovery_fails_if_no_tape(self):
-        """Asegura que el sistema falle correctamente si no hay grabación previa."""
-        with self.assertRaises(FileNotFoundError):
-            Catalog.discover(self.data_dir)
-
     def test_integrity_ignore_root_mtime_mutation(self):
         """ADR-002: El cambio de mtime en el directorio raíz NO debe abortar el stream."""
         self.create_file("data.txt", "content")
@@ -66,12 +58,11 @@ class TestFlow(TarTapeTestCase):
         # Mutamos el mtime del ROOT (directorio dataset/)
         past_time = time.time() - 10000
         os.utime(self.data_dir, (past_time, past_time))
+        tape = Tape(self.data_dir)
 
-        with Catalog.discover(self.data_dir) as tape:
-            player = TapePlayer(tape, self.data_dir)
-            # Esto NO debe lanzar RuntimeError
-            events = list(player.play(fast_verify=False))
-            self.assertTrue(any(e.type == "tape_completed" for e in events))
+        # Esto NO debe lanzar RuntimeError
+        events = list(tape.play(fast_verify=False))
+        self.assertTrue(any(e.type == "tape_completed" for e in events))
 
     def test_integrity_subdirectory_mtime_aborts(self):
         """ADR-002: El mtime de un SUB-directorio SÍ es crítico y debe abortar."""
@@ -84,10 +75,7 @@ class TestFlow(TarTapeTestCase):
         # Mutamos el mtime del SUB-directorio
         os.utime(sub, (time.time() + 500, time.time() + 500))
 
-        with Catalog.discover(self.data_dir) as tape:
-            player = TapePlayer(tape, self.data_dir)
-            with self.assertRaisesRegex(
-                TarIntegrityError, "Directory structure changed"
-            ):
-                for _ in player.play(fast_verify=False):
-                    pass
+        tape = Tape(self.data_dir)
+        with self.assertRaisesRegex(TarIntegrityError, "Directory structure changed"):
+            for _ in tape.play(fast_verify=False):
+                pass
