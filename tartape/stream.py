@@ -204,7 +204,14 @@ class TarStreamGenerator:
 
 
 class FolderVolume(TapeVolume):
-    def __init__(self, directory: Path, start_offset: int, end_offset: int, name: str):
+    def __init__(
+        self,
+        directory: Path,
+        start_offset: int,
+        end_offset: int,
+        name: str,
+        catalog=None,
+    ):
         super().__init__(name, end_offset - start_offset)
         self.directory = directory
         self.start_offset = start_offset
@@ -213,6 +220,7 @@ class FolderVolume(TapeVolume):
 
         # State
         self._catalog = None
+        self._external_catalog = catalog is not None
         self._player = None
         self._stream_gen = None
         self._position = 0
@@ -270,16 +278,19 @@ class FolderVolume(TapeVolume):
         if not self._closed:
             return self
 
-        self._catalog = tartape.get_catalog(self.directory)
-        self._catalog.open()
+        if not self._external_catalog:
+            self._catalog = tartape.get_catalog(self.directory)
+            self._catalog.open()
+
         self._player = TapePlayer(self.directory)
         self._closed = False
         self._init_stream(0)
         return self
 
     def __exit__(self, *args):
+        if not self._external_catalog and self._catalog:
+            self._catalog.close()
 
-        self._catalog.close()  # type: ignore
         self._closed = True
         self._stream_gen = None
 

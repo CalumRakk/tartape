@@ -95,9 +95,9 @@ class Tape:
         self, size: int, naming_template: Optional[str] = None
     ) -> Generator[Tuple[TapeVolume, VolumeManifest], None, None]:
         """It breaks the tape down into logical and physical volumes."""
-        with tartape.get_catalog(self.directory) as cat:
+        with tartape.get_catalog(self.directory):
             player = TapePlayer(self.directory)
-            chunker = TarChunker(cat, chunk_size=size)
+            chunker = TarChunker(chunk_size=size)
             yield from chunker.iter_volumes(player, naming_template=naming_template)
 
     def play(

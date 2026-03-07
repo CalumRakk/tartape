@@ -11,6 +11,7 @@ class DatabaseSession:
 
     def __init__(self, db_path: Union[Union[str, Path], Literal[":memory:"]]):
         self.db_path = Path(db_path) if db_path != ":memory:" else db_path
+
         self.db = peewee.SqliteDatabase(
             str(self.db_path),
             pragmas={

@@ -142,6 +142,7 @@ class TarChunker:
         player: TapePlayer,
         plan: Optional[List[VolumeManifest]] = None,
         naming_template=None,
+        catalog=None,
     ) -> Generator[Tuple[TapeVolume, VolumeManifest], None, None]:
         """
         Main iterator. Returns the File-Like Object (TarVolume) along with its Manifest.
@@ -170,5 +171,6 @@ class TarChunker:
                 start_offset=manifest.start_offset,
                 end_offset=manifest.end_offset,
                 name=net_name,
+                catalog=catalog,
             )
             yield volume, manifest
