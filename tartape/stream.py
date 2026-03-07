@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Generator, Iterable, Optional
 
 from tartape.exceptions import TarIntegrityError
+from tartape.factory import validate_integrity
 from tartape.header import TarHeader
 
 from .constants import CHUNK_SIZE_DEFAULT, TAR_BLOCK_SIZE, TAR_FOOTER_SIZE
@@ -56,13 +57,12 @@ class TarStreamGenerator:
         for entry in self.entries:
 
             # If we already passed this entire file, we skip it
-            if start_offset >= entry.end_offset:
-                last_offset = entry.end_offset
+            if start_offset >= entry.global_window.end:
+                last_offset = entry.global_window.end
                 continue
 
             # Always played whenever the stream touches this file.
             yield self._create_event_start(entry, start_offset)
-
             yield from self._emit_header(entry, start_offset)
 
             md5_hash: Optional[str] = None
@@ -73,37 +73,38 @@ class TarStreamGenerator:
                 yield from self._emit_padding(entry, start_offset)
 
             yield self._create_event_end(entry, md5_hash)
-            last_offset = entry.end_offset
+            last_offset = entry.global_window.end
 
         yield from self._emit_stream_gen_footer(start_offset, last_offset)
         yield TarTapeCompletedEvent(type="tape_completed")
         logger.info("TAR stream completed successfully.")
 
-    def _build_header(self, ManifestEntry: ManifestEntry) -> bytes:
-        header = TarHeader(ManifestEntry)
+    def _build_header(self, entry: ManifestEntry) -> bytes:
+        header = TarHeader(entry.info)
         return header.build()
 
     def _create_event_start(
         self, entry: ManifestEntry, global_skip: int
     ) -> TarFileStartEvent:
-        is_resumed = global_skip > entry.start_offset
+        is_resumed = global_skip > entry.global_window.start
         return TarFileStartEvent(
             type="file_start",
             entry=entry,
             metadata=FileStartMetadata(
-                start_offset=entry.start_offset, resumed=is_resumed
+                start_offset=entry.global_window.start, resumed=is_resumed
             ),
         )
 
     def _create_event_end(
         self, entry: ManifestEntry, md5: Optional[str]
     ) -> TarFileEndEvent:
-
         return TarFileEndEvent(
             type="file_end",
             entry=entry,
             metadata=FileEndMetadata(
-                md5sum=md5, end_offset=entry.end_offset, is_complete=(md5 is not None)
+                md5sum=md5,
+                end_offset=entry.global_window.end,
+                is_complete=(md5 is not None),
             ),
         )
 
@@ -111,7 +112,7 @@ class TarStreamGenerator:
         self, entry: ManifestEntry, global_skip: int
     ) -> Generator[TarEvent, None, None]:
         local_skip, bytes_to_send = self._get_stream_window(
-            global_skip, entry.start_offset, TAR_BLOCK_SIZE
+            global_skip, entry.global_window.start, TAR_BLOCK_SIZE
         )
         if bytes_to_send > 0:
             header = self._build_header(entry)[local_skip:]
@@ -144,17 +145,18 @@ class TarStreamGenerator:
         """Safely stream file content, ensuring that we do not read past the end of the file."""
 
         local_skip, bytes_remaining = self._get_stream_window(
-            global_skip, entry.header_end_offset, entry.size
+            global_skip, entry.header_end_offset, entry.info.size
         )
 
         if bytes_remaining <= 0:
             return None
 
-        entry.validate_integrity(self.directory)
+        source_path = entry.get_absolute_path(self.directory)
+        validate_integrity(entry.info, self.directory)
         md5 = hashlib.md5() if local_skip == 0 else None
 
         try:
-            with open(entry.source_path, "rb") as f:
+            with open(source_path, "rb") as f:
                 if local_skip > 0:
                     f.seek(local_skip)
 
@@ -162,7 +164,7 @@ class TarStreamGenerator:
                     read_size = min(chunk_size, bytes_remaining)
                     chunk = f.read(read_size)
                     if not chunk:
-                        raise TarIntegrityError(f"File shrunk: '{entry.source_path}'")
+                        raise TarIntegrityError(f"File shrunk: '{source_path}'")
 
                     if md5:
                         md5.update(chunk)
@@ -173,11 +175,11 @@ class TarStreamGenerator:
                     extra = f.read(1)
                     if extra:
                         raise TarIntegrityError(
-                            f"File grew: '{entry.source_path}'. Bytes left: {extra}"
+                            f"File grew: '{source_path}'. Bytes left: {extra}"
                         )
 
         except OSError as e:
-            raise TarIntegrityError(f"Error leyendo {entry.source_path}") from e
+            raise TarIntegrityError(f"Error reading {source_path}") from e
 
         return md5.hexdigest() if md5 else None
 
@@ -185,7 +187,7 @@ class TarStreamGenerator:
         self, entry: ManifestEntry, global_skip: int
     ) -> Generator[TarEvent, None, None]:
         # Padding starts where the data ends and ends at end_offset
-        padding_total = entry.end_offset - entry.content_end_offset
+        padding_total = entry.global_window.end - entry.content_end_offset
 
         _, bytes_to_send = self._get_stream_window(
             global_skip, entry.content_end_offset, padding_total

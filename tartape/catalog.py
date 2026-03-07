@@ -1,5 +1,6 @@
 import logging
 from pathlib import Path
+from typing import Iterable
 
 from .database import DatabaseSession
 from .models import TapeMetadata, Track
@@ -28,17 +29,24 @@ class Catalog:
     def get_track_count(self) -> int:
         return Track.select().count()
 
-    def get_track_at_offset(self, offset: int) -> Track:
-        """Find the track that contains a specific offset."""
+    def find_track_at_absolute_offset(self, absolute_offset: int) -> Track:
+        """
+        Finds the raw Track record that covers a specific byte position
+        in the global tape map.
+        """
         try:
             return Track.get(
-                (Track.start_offset <= offset) & (Track.end_offset > offset)
+                (Track.start_offset <= absolute_offset)
+                & (Track.end_offset > absolute_offset)
             )
         except Track.DoesNotExist:  # type: ignore
-            raise RuntimeError(f"No se encontró un track para el offset {offset}")
+            raise RuntimeError(f"No track found at absolute offset {absolute_offset}")
 
-    def get_tracks_for_stream(self, start_offset: int):
-        """Returns an iterator of tracks that should enter the stream."""
+    def query_tracks_intersecting_range(self, start_offset: int) -> Iterable[Track]:
+        """
+        Queries the database for tracks that exist from this point forward.
+        Returns raw Track objects (Static Data).
+        """
         return (
             Track.select()
             .where(Track.end_offset > start_offset)

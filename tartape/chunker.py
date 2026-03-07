@@ -4,7 +4,7 @@ from typing import Generator, Iterable, Optional, Tuple, cast
 
 from tartape.catalog import Catalog
 from tartape.models import Track
-from tartape.schemas import ManifestEntry, VolumeManifest
+from tartape.schemas import ByteWindow, ManifestEntry, VolumeManifest
 from tartape.stream import FolderVolume, TapeVolume
 
 logger = logging.getLogger(__name__)
@@ -52,7 +52,7 @@ class TarChunker:
 
     @classmethod
     def get_volume_manifest_for_range(
-        cls, fingerprint: str, vol_index: int, vol_start: int, vol_end: int
+        cls, fingerprint: str, vol_index: int, volume_window: ByteWindow
     ) -> VolumeManifest:
         """
 
@@ -67,21 +67,24 @@ class TarChunker:
         overlapping_tracks = cast(
             Iterable[Track],
             Track.select()
-            .where((Track.start_offset < vol_end) & (Track.end_offset > vol_start))
+            .where(
+                (Track.start_offset < volume_window.end)
+                & (Track.end_offset > volume_window.start)
+            )
             .order_by(Track.start_offset)
             .iterator(),
         )
 
         entries = [
-            ManifestEntry.from_track(track, vol_start, vol_end)
+            ManifestEntry.from_track(track, volume_window)
             for track in overlapping_tracks
         ]
         return VolumeManifest(
             tape_fingerprint=fingerprint,
             volume_index=vol_index,
-            start_offset=vol_start,
-            end_offset=vol_end,
-            chunk_size=vol_end - vol_start,
+            start_offset=volume_window.start,
+            end_offset=volume_window.end,
+            chunk_size=volume_window.end - volume_window.start,
             entries=entries,
         )
 
@@ -136,16 +139,15 @@ class TarChunker:
 
         default_template = "{name}_{fingerprint:.8}.tar.{pindex}"
         template = naming_template or default_template
-        for vol_index, (vol_start, vol_end) in enumerate(segments):
+        for i, (vol_start, vol_end) in enumerate(segments):
             with Catalog.from_directory(directory):
-                manifest = self.get_volume_manifest_for_range(
-                    fingerprint, vol_index, vol_start, vol_end
-                )
+                window = ByteWindow(start=vol_start, end=vol_end)
+                manifest = self.get_volume_manifest_for_range(fingerprint, i, window)
 
             filename = self._resolve_volume_name(
                 fingerprint=fingerprint,
                 root_name=root_name,
-                vol_index=vol_index,
+                vol_index=i,
                 total_vols=total_vols,
                 template=template,
             )

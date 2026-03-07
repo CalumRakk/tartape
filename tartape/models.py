@@ -1,4 +1,3 @@
-from pathlib import Path
 from typing import Optional, cast
 
 from peewee import (
@@ -10,7 +9,7 @@ from peewee import (
 
 from tartape.constants import TAR_BLOCK_SIZE
 from tartape.database import db_proxy
-from tartape.exceptions import TarIntegrityError
+from tartape.schemas import EntryMetadata
 
 
 class BaseModel(Model):
@@ -26,15 +25,16 @@ class TapeMetadata(BaseModel):
 
 
 class Track(BaseModel):
-    """Represents a file/folder on the tape"""
+    """
+    Represents a file's existence on the Tape.
+    It stores the EntryMetadata + The Global Window (start/end offsets).
+    """
 
     id: int
     arc_path = cast(str, CharField(primary_key=True))
     rel_path = cast(str, CharField())
 
-    md5sum = cast(Optional[str], CharField(null=True))
-
-    # Tar Header
+    # Metadata fields (Mirroring EntryMetadata)
     size = cast(int, IntegerField())
     mtime = cast(int, IntegerField())
     mode = cast(int, IntegerField())
@@ -46,11 +46,11 @@ class Track(BaseModel):
     is_dir = cast(bool, BooleanField(default=False))
     is_symlink = cast(bool, BooleanField(default=False))
     linkname = cast(str, CharField(null=True))
+    md5sum = cast(Optional[str], CharField(null=True))
 
+    # The Global Window (Tape Coordinates)
     start_offset = cast(int, IntegerField(null=True))
     end_offset = cast(int, IntegerField(null=True))
-
-    _source_root = None
 
     @property
     def is_file(self) -> bool:
@@ -58,28 +58,7 @@ class Track(BaseModel):
 
     @property
     def has_content(self) -> bool:
-        """Determines whether a data block (regular files) is required."""
         return not (self.is_dir or self.is_symlink)
-
-    @property
-    def source_path(self) -> Path:
-        if self._source_root is not None:
-            return Path(self._source_root) / self.rel_path
-        return Path(self.rel_path)
-
-    @source_path.setter
-    def source_path(self, value: Path):
-        self._source_root = value
-
-    @property
-    def header_end_offset(self) -> int:
-        return self.start_offset + TAR_BLOCK_SIZE
-
-    @property
-    def content_end_offset(self) -> int:
-        # Only regular files have content
-        content_size = self.size if self.has_content else 0
-        return self.header_end_offset + content_size
 
     @property
     def padding_size(self) -> int:
@@ -89,44 +68,24 @@ class Track(BaseModel):
 
     @property
     def total_block_size(self) -> int:
-        content_size = self.size if not (self.is_dir or self.is_symlink) else 0
+        """Required by the Recorder to calculate the next offset."""
+        content_size = self.size if self.has_content else 0
         return TAR_BLOCK_SIZE + content_size + self.padding_size
 
-    def validate_integrity(self, tape_root_directory: Path):
-        """
-        Receive the ROOT of the folder being streamed.
-        Example: Path("/mnt/data")
-
-
-        Strict implementation of ADR-002.
-        Verify that the file on disk matches the inventory.
-        """
-        # TODO: REMOVE THIS DUP FUNCTION
-
-        from tartape.factory import TarEntryFactory
-
-        full_disk_path = tape_root_directory / self.rel_path
-
-        stats = TarEntryFactory.inspect(full_disk_path)
-        if not stats.exists:
-            raise TarIntegrityError(f"File missing: {self.arc_path}")
-
-        if self.is_dir:
-            # ADR-002: Root's mtime is ignored
-            if self.rel_path in ("", "."):
-                return
-            if stats.mtime != self.mtime:
-                raise TarIntegrityError(f"Directory structure changed: {self.arc_path}")
-            return
-
-        if stats.mtime != self.mtime:
-            raise TarIntegrityError(f"File modified (mtime): {self.arc_path}")
-
-        if not self.is_symlink:
-            if stats.size != self.size:
-                raise TarIntegrityError(f"File size changed: {self.arc_path}")
-            if stats.mode != self.mode:
-                raise TarIntegrityError(f"Permissions changed: {self.arc_path}")
-        else:
-            if stats.linkname != self.linkname:
-                raise TarIntegrityError(f"Symlink target changed: {self.arc_path}")
+    def to_metadata(self) -> EntryMetadata:
+        """Hydrates the pure metadata object from the DB record."""
+        return EntryMetadata(
+            arc_path=self.arc_path,
+            rel_path=self.rel_path,
+            size=self.size,
+            mtime=self.mtime,
+            mode=self.mode,
+            uid=self.uid,
+            gid=self.gid,
+            uname=self.uname,
+            gname=self.gname,
+            is_dir=self.is_dir,
+            is_symlink=self.is_symlink,
+            linkname=self.linkname or "",
+            md5sum=self.md5sum,
+        )

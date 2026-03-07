@@ -10,7 +10,9 @@ import tartape
 from tartape.catalog import Catalog
 from tartape.chunker import TarChunker
 from tartape.constants import TAPE_METADATA_DIR
+from tartape.factory import validate_integrity
 from tartape.models import Track
+from tartape.schemas import ByteWindow, ManifestEntry
 from tartape.stream import FolderVolume, TapeVolume, TarStreamGenerator
 
 logger = logging.getLogger(__name__)
@@ -82,42 +84,38 @@ class Tape:
             with tartape.get_catalog(self.directory) as cat:
                 if deep:
                     for track in Track.select().order_by(Track.arc_path).iterator():
-                        track.validate_integrity(self.directory)
+                        validate_integrity(track, self.directory)
                 else:
                     total = Track.select().count()
                     if total > 0:
                         samples = Track.select().order_by(peewee.fn.Random()).limit(15)
                         for track in samples:
-                            track.validate_integrity(self.directory)
+                            validate_integrity(track, self.directory)
                 return True
         except Exception:
             if raise_exception:
                 raise
             return False
 
-    def _verify_resume_point(self, catalog: Catalog, offset: int):
+    def _verify_resume_point_integrity(self, catalog: Catalog, absolute_offset: int):
         """
-        Find the track containing the requested offset and validate its integrity.
-        Ensure the resume point is consistent.
+        Resuming a stream is a critical operation. We find the track at the
+        exact failure point and verify it hasn't mutated on disk.
+
+        This method must be called within a 'with catalog'
         """
 
-        if offset < 0:
-            raise ValueError(f"Offset cannot be negative: {offset}")
+        if absolute_offset < 0 or absolute_offset >= self.total_size:
+            raise ValueError(f"Invalid resume offset: {absolute_offset}")
 
-        if offset >= self.total_size:
-            raise ValueError(
-                f"Offset {offset} is beyond the total tape size ({self.total_size})"
-            )
-
-        # If the offset falls here, there is no file to validate, it's just zeros.
-        if offset >= self.total_size - 1024:
-            logger.info(
-                f"Resume point at {offset} falls into the TAR footer. No file validation needed."
-            )
+        # The 'Footer Zone' (last 1024 bytes) has no files, it's just padding.
+        if absolute_offset >= self.total_size - 1024:
             return
 
-        track = catalog.get_track_at_offset(offset)
-        track.validate_integrity(self.directory)
+        track = catalog.find_track_at_absolute_offset(absolute_offset)
+        full_tape_window = ByteWindow(0, self.total_size)
+        entry = ManifestEntry.from_track(track, full_tape_window)
+        validate_integrity(entry.info, self.directory)
 
     def iter_volumes(self, size: int, naming_template: Optional[str] = None):
         """It breaks the tape down into logical and physical volumes."""
@@ -134,16 +132,16 @@ class Tape:
     ) -> Generator:
         self.verify(deep=not fast_verify, raise_exception=True)
 
+        tape_window = ByteWindow(start=0, end=self.total_size)
         with tartape.get_catalog(self.directory) as cat:
             if start_offset > 0:
-                self._verify_resume_point(cat, start_offset)
+                self._verify_resume_point_integrity(cat, start_offset)
 
-            query = cat.get_tracks_for_stream(start_offset)
+            tracks = cat.query_tracks_intersecting_range(start_offset)
 
             def track_loader():
-                for track in query:
-                    track.source_path = self.directory
-                    yield track
+                for track in tracks:
+                    yield ManifestEntry.from_track(track, tape_window)
 
             engine = TarStreamGenerator(track_loader(), self.directory)
             yield from engine.stream(start_offset=start_offset, chunk_size=chunk_size)
@@ -154,7 +152,7 @@ class Tape:
         if not tartape.exists(self.directory):
             raise FileNotFoundError(f"The tape does not exist in: {self.directory}")
 
-        # Basic range validation
+        volume_window = ByteWindow(start=vol_start, end=vol_end)
         if vol_start < 0 or vol_end > self.total_size or vol_start >= vol_end:
             raise ValueError(
                 f"Invalid range: {vol_start}-{vol_end}. Total tape size is {self.total_size}"
@@ -162,7 +160,7 @@ class Tape:
 
         with Catalog.from_directory(self.directory):
             manifest = TarChunker.get_volume_manifest_for_range(
-                self.fingerprint, vol_index, vol_start, vol_end
+                self.fingerprint, vol_index, volume_window
             )
 
         return FolderVolume(self.directory, manifest, vol_name)

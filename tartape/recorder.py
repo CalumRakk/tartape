@@ -11,6 +11,7 @@ from typing import Iterable, Optional, cast
 from tartape.constants import TAPE_DB_NAME, TAPE_METADATA_DIR
 from tartape.database import DatabaseSession
 from tartape.factory import ExcludeType, TarEntryFactory
+from tartape.schemas import EntryMetadata
 
 from .constants import DEFAULT_EXCLUDES, TAR_FOOTER_SIZE
 from .models import TapeMetadata, Track
@@ -62,7 +63,9 @@ class TapeRecorder:
 
     def commit(self) -> str:
         """
-        Calculates offsets, generates signature and saves metadata.
+        Freezes the tape state.
+        Calculates the Global Window (start_offset, end_offset) for every track.
+
         Returns the signature (fingerprint).
         """
 
@@ -70,20 +73,22 @@ class TapeRecorder:
             self._run_discovery()
             self._flush_buffer()
 
-            current_offset = 0
-
             with self.db.atomic():
                 # ADR-001: Important for deterministic ordering
                 tracks = cast(
                     Iterable[Track], Track.select().order_by(Track.arc_path).iterator()
                 )
-                current_offset = 0
+                current_global_offset = 0
                 batch = []
 
                 for track in tracks:
-                    track.start_offset = current_offset
-                    current_offset += track.total_block_size
-                    track.end_offset = current_offset
+                    # CALCULATE GLOBAL WINDOW
+                    track.start_offset = current_global_offset
+
+                    # Advance the cursor by the full block size (Header + Content + Padding)
+                    current_global_offset += track.total_block_size
+
+                    track.end_offset = current_global_offset
                     batch.append(track)
 
                     if len(batch) == self._batch_size:
@@ -103,7 +108,7 @@ class TapeRecorder:
                 else:
                     exclude_val = json.dumps(self.exclude)
 
-                total_size = int(current_offset + TAR_FOOTER_SIZE)
+                total_size = int(current_global_offset + TAR_FOOTER_SIZE)
                 fingerprint = self._calculate_fingerprint()
                 capture_time = str(int(time.time()))
 
@@ -153,7 +158,7 @@ class TapeRecorder:
         if rel_path == ".":
             rel_path = ""
 
-        track = TarEntryFactory.create_track(
+        metadata: Optional[EntryMetadata] = TarEntryFactory.create_metadata(
             source_path,
             arcname=arcname,
             rel_path=rel_path,
@@ -161,9 +166,23 @@ class TapeRecorder:
             calculate_hash=self.calculate_hashes,
         )
 
-        if track:
-            # We establish the root so that the factory can work with relative paths
-            track._source_root = self.directory
+        if metadata:
+            track = Track(
+                arc_path=metadata.arc_path,
+                rel_path=metadata.rel_path,
+                size=metadata.size,
+                mtime=metadata.mtime,
+                mode=metadata.mode,
+                uid=metadata.uid,
+                gid=metadata.gid,
+                uname=metadata.uname,
+                gname=metadata.gname,
+                is_dir=metadata.is_dir,
+                is_symlink=metadata.is_symlink,
+                linkname=metadata.linkname,
+                md5sum=metadata.md5sum,
+            )
+
             self._buffer.append(track)
 
             if len(self._buffer) >= self._batch_size:

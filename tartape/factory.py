@@ -5,8 +5,9 @@ import stat as stat_module
 from pathlib import Path
 from typing import Callable, List, Optional, Union
 
+from tartape.exceptions import TarIntegrityError
 from tartape.models import Track
-from tartape.schemas import DiskEntryStats
+from tartape.schemas import DiskEntryStats, EntryMetadata
 
 try:
     import grp
@@ -44,9 +45,7 @@ class TarEntryFactory:
 
     @staticmethod
     def inspect(path: Path) -> DiskEntryStats:
-        """
-        Single point of file inspection on the system.
-        """
+        """Performs low-level lstat on the path and returns raw stats."""
         try:
             st = path.lstat()
 
@@ -89,53 +88,83 @@ class TarEntryFactory:
             return DiskEntryStats(exists=False)
 
     @classmethod
-    def create_track(
+    def create_metadata(
         cls,
         source_path: Union[Path, str],
         rel_path: str,
         arcname: str,
         anonymize: bool = True,
         calculate_hash: bool = False,
-    ) -> Optional[Track]:
+    ) -> Optional[EntryMetadata]:
         """
         Analyzes a path and creates a TarEntry.
         Returns None if the file is an unsupported type (Socket, Pipe, etc).
         Raises OSError/FileNotFoundError if there are access issues.
         """
-        stats = cls.inspect(Path(source_path))
+        path = Path(source_path)
+        stats = cls.inspect(path)
+
         if not stats.exists or not (stats.is_dir or stats.is_file or stats.is_symlink):
             return None
 
-        from tartape.header import TarHeader
+        # Determine link target for symlinks
+        linkname = os.readlink(path) if stats.is_symlink else ""
 
-        temp_track = Track(arc_path=arcname)
-        TarHeader(temp_track)._split_path(arcname)
+        # Directories and symlinks have 0 size in TAR headers
+        effective_size = 0 if (stats.is_dir or stats.is_symlink) else stats.size
 
-        linkname = ""
-        size = stats.size
-
-        if stats.is_symlink:
-            linkname = os.readlink(source_path)
-            size = 0  # In TAR, symlinks have a size of 0
-        elif stats.is_dir:
-            size = 0  # Directories have a size of 0 in the TAR header
+        uid = 0 if anonymize else stats.uid
+        gid = 0 if anonymize else stats.gid
+        uname = "root" if anonymize else stats.uname
+        gname = "root" if anonymize else stats.gname
 
         md5_value = None
         if calculate_hash and stats.is_file:
             md5_value = cls.calculate_md5(Path(source_path))
 
-        return Track(
+        return EntryMetadata(
             arc_path=arcname,
             rel_path=rel_path,
-            size=size,
+            size=effective_size,
             mtime=int(stats.mtime),
+            mode=stats.mode,
+            uid=uid,
+            gid=gid,
+            uname=uname,
+            gname=gname,
             is_dir=stats.is_dir,
             is_symlink=stats.is_symlink,
             linkname=linkname,
-            mode=stats.mode,
-            uid=0 if anonymize else stats.uid,
-            gid=0 if anonymize else stats.gid,
-            uname="root" if anonymize else stats.uname,
-            gname="root" if anonymize else stats.gname,
             md5sum=md5_value,
         )
+
+
+def validate_integrity(
+    expected: EntryMetadata | Track, tape_root_directory: Path
+) -> None:
+    """
+    Strict implementation of ADR-002.
+    Compares the expected pure metadata against the current physical disk state.
+    Raises TarIntegrityError if any discrepancy is found.
+    """
+    full_disk_path = Path(tape_root_directory) / expected.rel_path
+    stats = TarEntryFactory.inspect(full_disk_path)
+
+    if not stats.exists:
+        raise TarIntegrityError(f"File missing: {expected.arc_path}")
+
+    # ADR-002: Directory structural integrity
+    if expected.is_dir:
+        if expected.rel_path in ("", "."):
+            return  # Root directory mtime is ignored
+        if stats.mtime != expected.mtime:
+            raise TarIntegrityError(f"Directory structure changed: {expected.arc_path}")
+        return
+
+    # ADR-002: File integrity
+    if stats.mtime != expected.mtime:
+        raise TarIntegrityError(f"File modified (mtime): {expected.arc_path}")
+
+    if not expected.is_symlink:
+        if stats.size != expected.size:
+            raise TarIntegrityError(f"File size changed: {expected.arc_path}")

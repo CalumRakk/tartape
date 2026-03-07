@@ -1,7 +1,6 @@
 import logging
 
-from tartape.models import Track
-from tartape.schemas import ManifestEntry
+from tartape.schemas import EntryMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +18,7 @@ class TarHeader:
     Base-256 sizes, each header measures EXACTLY 512 bytes.
     """
 
-    def __init__(self, entry: ManifestEntry | Track):
+    def __init__(self, entry: EntryMetadata):
         self.buffer = bytearray(512)
         self.entry = entry
 

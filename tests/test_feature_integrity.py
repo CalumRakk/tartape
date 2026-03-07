@@ -45,7 +45,7 @@ class TestIntegritySafeguards(TarTapeTestCase):
 
         f = self.data_dir / "grow.bin"
         f.write_text("original")
-        recorder = TapeRecorder(self.data_dir).commit()
+        TapeRecorder(self.data_dir).commit()
 
         f.write_text("original plus more")
 
