@@ -1,16 +1,20 @@
 import json
+import logging
 import shutil
 from pathlib import Path
 from typing import Generator, List, Optional, Tuple, Union
 
+import peewee
+
 import tartape
+from tartape.catalog import Catalog
 from tartape.chunker import TarChunker
 from tartape.constants import TAPE_METADATA_DIR
-from tartape.exceptions import TarIntegrityError
 from tartape.models import Track
-from tartape.player import TapePlayer
 from tartape.schemas import VolumeManifest
-from tartape.stream import FileVolume, FolderVolume, TapeVolume
+from tartape.stream import FileVolume, FolderVolume, TapeVolume, TarStreamGenerator
+
+logger = logging.getLogger(__name__)
 
 
 class Tape:
@@ -75,30 +79,57 @@ class Tape:
             shutil.rmtree(metadata_dir)
 
     def verify(self, deep: bool = False, raise_exception: bool = False):
-        """Returns True if the tape is valid."""
-
-        with tartape.get_catalog(self.directory) as cat:
-            player = TapePlayer(self.directory)  # type: ignore
-
-            try:
+        """Check the integrity of the tape."""
+        try:
+            with tartape.get_catalog(self.directory) as cat:
                 if deep:
-                    player._verify()
+                    for track in Track.select().order_by(Track.arc_path).iterator():
+                        track.validate_integrity(self.directory)
                 else:
-                    player._spot_check()
+                    total = Track.select().count()
+                    if total > 0:
+                        samples = Track.select().order_by(peewee.fn.Random()).limit(15)
+                        for track in samples:
+                            track.validate_integrity(self.directory)
                 return True
-            except TarIntegrityError:
-                if raise_exception:
-                    raise
-                return False
+        except Exception:
+            if raise_exception:
+                raise
+            return False
+
+    def _verify_resume_point(self, catalog: Catalog, offset: int):
+        """
+        Find the track containing the requested offset and validate its integrity.
+        Ensure the resume point is consistent.
+        """
+
+        if offset < 0:
+            raise ValueError(f"Offset cannot be negative: {offset}")
+
+        if offset >= self.total_size:
+            raise ValueError(
+                f"Offset {offset} is beyond the total tape size ({self.total_size})"
+            )
+
+        # If the offset falls here, there is no file to validate, it's just zeros.
+        if offset >= self.total_size - 1024:
+            logger.info(
+                f"Resume point at {offset} falls into the TAR footer. No file validation needed."
+            )
+            return
+
+        track = catalog.get_track_at_offset(offset)
+        track.validate_integrity(self.directory)
 
     def iter_volumes(
         self, size: int, naming_template: Optional[str] = None
     ) -> Generator[Tuple[TapeVolume, VolumeManifest], None, None]:
         """It breaks the tape down into logical and physical volumes."""
         with tartape.get_catalog(self.directory):
-            player = TapePlayer(self.directory)
             chunker = TarChunker(chunk_size=size)
-            yield from chunker.iter_volumes(player, naming_template=naming_template)
+            yield from chunker.iter_volumes(
+                self.directory, naming_template=naming_template
+            )
 
     def play(
         self,
@@ -106,13 +137,29 @@ class Tape:
         chunk_size: int = 64 * 1024,
         fast_verify: bool = True,
     ) -> Generator:
-        with tartape.get_catalog(self.directory):
-            player = TapePlayer(self.directory)
-            yield from player.play(
-                start_offset=start_offset,
-                chunk_size=chunk_size,
-                fast_verify=fast_verify,
-            )
+        self.verify(deep=not fast_verify, raise_exception=True)
+
+        with tartape.get_catalog(self.directory) as cat:
+            if start_offset > 0:
+                self._verify_resume_point(cat, start_offset)
+
+            query = cat.get_tracks_for_stream(start_offset)
+
+            def track_loader():
+                for track in query:
+                    track.source_path = self.directory
+                    yield track
+
+            engine = TarStreamGenerator(track_loader(), self.directory)
+            yield from engine.stream(start_offset=start_offset, chunk_size=chunk_size)
+
+        # with tartape.get_catalog(self.directory):
+        #     player = TapePlayer(self.directory)
+        #     yield from player.play(
+        #         start_offset=start_offset,
+        #         chunk_size=chunk_size,
+        #         fast_verify=fast_verify,
+        #     )
 
     def get_volume(
         self, start: int, end: int, name: Optional[str] = None

@@ -2,12 +2,8 @@ import hashlib
 import io
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Generator, Iterable, Optional
+from typing import Generator, Iterable, Optional
 
-if TYPE_CHECKING:
-    from tartape.player import TapePlayer
-
-import tartape
 from tartape.exceptions import TarIntegrityError
 from tartape.header import TarHeader
 
@@ -78,7 +74,7 @@ class TarStreamGenerator:
             yield self._create_event_end(entry, md5_hash)
             last_offset = entry.end_offset
 
-        yield from self._emit_tape_footer(start_offset, last_offset)
+        yield from self._emit_stream_gen_footer(start_offset, last_offset)
         yield TarTapeCompletedEvent(type="tape_completed")
         logger.info("TAR stream completed successfully.")
 
@@ -192,7 +188,7 @@ class TarStreamGenerator:
         if bytes_to_send > 0:
             yield TarFileDataEvent(type="file_data", data=b"\0" * bytes_to_send)
 
-    def _emit_tape_footer(
+    def _emit_stream_gen_footer(
         self, global_skip: int, footer_start: int
     ) -> Generator[TarEvent, None, None]:
         _, bytes_to_send = self._get_stream_window(
@@ -210,7 +206,6 @@ class FolderVolume(TapeVolume):
         start_offset: int,
         end_offset: int,
         name: str,
-        catalog=None,
     ):
         super().__init__(name, end_offset - start_offset)
         self.directory = directory
@@ -219,9 +214,7 @@ class FolderVolume(TapeVolume):
         self.size = end_offset - start_offset
 
         # State
-        self._catalog = None
-        self._external_catalog = catalog is not None
-        self._player = None
+        self._tape = None
         self._stream_gen = None
         self._position = 0
         self._buffer = bytearray()
@@ -251,9 +244,10 @@ class FolderVolume(TapeVolume):
                 self._md5_invalid = True
 
         global_target = self.start_offset + offset_in_volume
-        if not self._player:
-            raise RuntimeError("Tape player not initialized.")
-        self._stream_gen = self._player.play(start_offset=global_target)
+        if not self._tape:
+            raise RuntimeError("Tape not initialized.")
+
+        self._stream_gen = self._tape.play(start_offset=global_target, fast_verify=True)
 
     @property
     def md5sum(self) -> str:
@@ -273,26 +267,22 @@ class FolderVolume(TapeVolume):
         return self._position == self.size
 
     def __enter__(self):
-        from tartape.player import TapePlayer
+        from tartape.tape import Tape
 
         if not self._closed:
             return self
-
-        if not self._external_catalog:
-            self._catalog = tartape.get_catalog(self.directory)
-            self._catalog.open()
-
-        self._player = TapePlayer(self.directory)
+        self._tape = Tape(self.directory)
         self._closed = False
         self._init_stream(0)
         return self
 
     def __exit__(self, *args):
-        if not self._external_catalog and self._catalog:
-            self._catalog.close()
+        if self._stream_gen:
+            self._stream_gen.close()
 
         self._closed = True
         self._stream_gen = None
+        self._tape = None
 
     def open(self):
         self.__enter__()
@@ -317,6 +307,8 @@ class FolderVolume(TapeVolume):
                 if event.type == "file_data":
                     self._buffer.extend(event.data)
             except StopIteration:
+                if self._stream_gen:
+                    self._stream_gen.close()
                 break
 
         chunk_size = min(bytes_to_read, len(self._buffer))

@@ -42,26 +42,27 @@ If you don't need to split the archive, you can consume the byte stream directly
 import requests
 import tartape
 
-with tartape.open("./massive_dataset") as tape:
-    # 'play' emits events. We filter for 'file_data' to get raw bytes.
-    def data_generator():
-        for event in tape.play():
-            if event.type == "file_data":
-                yield event.data
+tape = tartape.Tape("./massive_dataset")
 
-    # Send the full TAR stream via HTTP without saving it to disk
-    requests.put("https://storage.com/backup.tar", data=data_generator())
+def data_generator():
+    # 'play' emits events. We filter for 'file_data' to get raw bytes.
+    for event in tape.play():
+        if event.type == "file_data":
+            yield event.data
+
+# Send the full TAR stream via HTTP without saving it to disk
+requests.put("https://storage.com/backup.tar", data=data_generator())
 ```
 
 ### 3. Volume Slicing (Cloud Slicing)
 Ideal for services like AWS S3 or Azure Blobs that prefer fixed-size parts.
 
 ```python
-with tartape.open("./massive_dataset") as tape:
-    # Split the stream into 1GB logical volumes
-    for volume, manifest in tape.iter_volumes(size=1024**3):
-        # 'volume' behaves like an open file (read, seek, tell)
-        upload_to_s3(key=volume.name, body=volume)
+
+# Split the stream into 1GB logical volumes
+for volume, manifest in Tape("./massive_dataset").iter_volumes(size=1024**3):
+    # 'volume' behaves like an open file (read, seek, tell)
+    upload_to_s3(key=volume.name, body=volume)
 ```
 
 ### 4. Byte-Perfect Resume

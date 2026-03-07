@@ -1,9 +1,9 @@
 import logging
 import math
+from pathlib import Path
 from typing import Generator, Iterable, List, Optional, Tuple, cast
 
 from tartape.models import TapeMetadata, Track
-from tartape.player import TapePlayer
 from tartape.schemas import EntryState, ManifestEntry, VolumeManifest
 from tartape.stream import FolderVolume, TapeVolume
 
@@ -139,10 +139,9 @@ class TarChunker:
 
     def iter_volumes(
         self,
-        player: TapePlayer,
+        directory: Path,
         plan: Optional[List[VolumeManifest]] = None,
         naming_template=None,
-        catalog=None,
     ) -> Generator[Tuple[TapeVolume, VolumeManifest], None, None]:
         """
         Main iterator. Returns the File-Like Object (TarVolume) along with its Manifest.
@@ -152,7 +151,7 @@ class TarChunker:
             plan = self.generate_plan()
 
         total_vols = len(plan)
-        root_name = player.directory.name
+        root_name = directory.name
 
         padding_width = max(3, len(str(total_vols)))
         default_template = "{name}_{fingerprint:.8}.tar.{pindex}"
@@ -167,10 +166,9 @@ class TarChunker:
             )
 
             volume = FolderVolume(
-                directory=player.directory,
+                directory=directory,
                 start_offset=manifest.start_offset,
                 end_offset=manifest.end_offset,
                 name=net_name,
-                catalog=catalog,
             )
             yield volume, manifest

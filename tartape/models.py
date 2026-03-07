@@ -101,6 +101,7 @@ class Track(BaseModel):
         Strict implementation of ADR-002.
         Verify that the file on disk matches the inventory.
         """
+
         from tartape.factory import TarEntryFactory
 
         full_disk_path = tape_root_directory / self.rel_path
