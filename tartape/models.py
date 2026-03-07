@@ -44,7 +44,7 @@ class Track(BaseModel):
     gname = cast(str, CharField())
 
     is_dir = cast(bool, BooleanField(default=False))
-    is_symlink = BooleanField(default=False)
+    is_symlink = cast(bool, BooleanField(default=False))
     linkname = cast(str, CharField(null=True))
 
     start_offset = cast(int, IntegerField(null=True))
@@ -101,6 +101,7 @@ class Track(BaseModel):
         Strict implementation of ADR-002.
         Verify that the file on disk matches the inventory.
         """
+        # TODO: REMOVE THIS DUP FUNCTION
 
         from tartape.factory import TarEntryFactory
 

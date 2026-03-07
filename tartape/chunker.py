@@ -1,13 +1,41 @@
 import logging
-import math
 from pathlib import Path
-from typing import Generator, Iterable, List, Optional, Tuple, cast
+from typing import Generator, Iterable, Optional, Tuple, cast
 
-from tartape.models import TapeMetadata, Track
-from tartape.schemas import EntryState, ManifestEntry, VolumeManifest
+from tartape.catalog import Catalog
+from tartape.models import Track
+from tartape.schemas import ManifestEntry, VolumeManifest
 from tartape.stream import FolderVolume, TapeVolume
 
 logger = logging.getLogger(__name__)
+
+
+def calculate_segments(
+    total_size: int, chunk_size: int
+) -> Generator[tuple[int, int], None, None]:
+    """
+    Generate `(start, end)` byte ranges used to split a file into chunks.
+
+    Each range follows Python slicing semantics: `start` is inclusive and
+    `end` is exclusive.
+
+    Ranges are produced lazily (as a generator), so the full list is not
+    materialized in memory.
+
+    Reference:
+        https://chatgpt.com/share/68a6ec82-8874-8012-9c27-af04127e28b0
+
+    Args:
+        file_size: Total size of the file in bytes.
+        chunk_size: Desired size of each chunk.
+
+    Yields:
+        Tuple[int, int]: A `(start, end)` pair representing the byte range
+        of a chunk. Example: `(0, 100)`, `(100, 200)`, ...
+    """
+    for start in range(0, total_size, chunk_size):
+        end = min(start + chunk_size, total_size)
+        yield start, end
 
 
 class TarChunker:
@@ -22,93 +50,44 @@ class TarChunker:
             raise ValueError("The volume size (chunk_size) must be greater than 0.")
         self.chunk_size = chunk_size
 
-    @property
-    def fingerprint(self) -> str:
-        return TapeMetadata.get(TapeMetadata.key == "fingerprint").value
-
-    @property
-    def total_size(self) -> int:
-        return int(TapeMetadata.get(TapeMetadata.key == "total_size").value)
-
-    def generate_plan(self) -> List[VolumeManifest]:
+    @classmethod
+    def get_volume_manifest_for_range(
+        cls, fingerprint: str, vol_index: int, vol_start: int, vol_end: int
+    ) -> VolumeManifest:
         """
-        It analyzes the O(N) database and calculates exactly which file fragments
-        will fall on which volume. It does not read bytes from the disk.
+
+        Calculates the manifest for a specific range of bytes.
+
+        This method assumes it is called within a database context.
         """
-        logger.info(f"Generating volume plan (Chunk Size: {self.chunk_size} bytes)...")
-        manifests = []
 
-        total_volumes = math.ceil(self.total_size / self.chunk_size)
-
-        for vol_index in range(total_volumes):
-            vol_start = vol_index * self.chunk_size
-            vol_end = min(vol_start + self.chunk_size, self.total_size)
-            actual_chunk_size = vol_end - vol_start
-
-            # Only the files that "touch" this byte window.
-            # Overlap condition: The file starts before the volume ends,
-            # And ends after the volume starts.
-            overlapping_tracks = cast(
-                Iterable[Track],
-                Track.select()
-                .where((Track.start_offset < vol_end) & (Track.end_offset > vol_start))
-                .order_by(Track.start_offset)
-                .iterator(),
-            )
-
-            entries = []
-            for track in overlapping_tracks:
-                starts_inside = track.start_offset >= vol_start
-                ends_inside = track.end_offset <= vol_end
-
-                if starts_inside and ends_inside:
-                    state = EntryState.COMPLETE
-                elif starts_inside and not ends_inside:
-                    state = EntryState.HEAD
-                elif not starts_inside and ends_inside:
-                    state = EntryState.TAIL
-                else:
-                    state = EntryState.BODY
-
-                # If it starts before the volume, its local offset is 0.
-                local_start = max(0, track.start_offset - vol_start)
-
-                # The bytes used are the minimum between the end of the file and the end of the volume
-                # minus the maximum between the beginning of the file and the beginning of the volume.
-                bytes_occupied = min(track.end_offset, vol_end) - max(
-                    track.start_offset, vol_start
-                )
-
-                entries.append(
-                    ManifestEntry(
-                        arc_path=track.arc_path,
-                        state=state,
-                        offset_in_volume=local_start,
-                        bytes_in_volume=bytes_occupied,
-                        md5sum=track.md5sum,
-                        size=track.size,
-                        track_id=track.id,
-                        is_dir=track.is_dir,
-                    )
-                )
-
-            manifest = VolumeManifest(
-                tape_fingerprint=self.fingerprint,
-                volume_index=vol_index,
-                start_offset=vol_start,
-                end_offset=vol_end,
-                chunk_size=actual_chunk_size,
-                entries=entries,
-            )
-            manifests.append(manifest)
-
-        logger.info(
-            f"Plan successfully generated: {len(manifests)} calculated volumes."
+        # Only the files that "touch" this byte window.
+        # Overlap condition: The file starts before the volume ends,
+        # And ends after the volume starts.
+        overlapping_tracks = cast(
+            Iterable[Track],
+            Track.select()
+            .where((Track.start_offset < vol_end) & (Track.end_offset > vol_start))
+            .order_by(Track.start_offset)
+            .iterator(),
         )
-        return manifests
+
+        entries = [
+            ManifestEntry.from_track(track, vol_start, vol_end)
+            for track in overlapping_tracks
+        ]
+        return VolumeManifest(
+            tape_fingerprint=fingerprint,
+            volume_index=vol_index,
+            start_offset=vol_start,
+            end_offset=vol_end,
+            chunk_size=vol_end - vol_start,
+            entries=entries,
+        )
 
     def _resolve_volume_name(
         self,
+        fingerprint: str,
         root_name: str,
         vol_index: int,
         total_vols: int,
@@ -125,7 +104,7 @@ class TarChunker:
         try:
             return actual_template.format(
                 name=root_name,
-                fingerprint=self.fingerprint,
+                fingerprint=fingerprint,
                 index=vol_index,  # 0, 1, 2...
                 pindex=pindex,  # 001, 002...
                 part=part_num,
@@ -134,41 +113,46 @@ class TarChunker:
         except (KeyError, ValueError) as e:
             logger.warning(f"Naming template error: {e}. Falling back to default.")
             return default_template.format(
-                name=root_name, fingerprint=self.fingerprint, pindex=pindex
+                name=root_name, fingerprint=fingerprint, pindex=pindex
             )
 
     def iter_volumes(
         self,
         directory: Path,
-        plan: Optional[List[VolumeManifest]] = None,
         naming_template=None,
     ) -> Generator[Tuple[TapeVolume, VolumeManifest], None, None]:
         """
         Main iterator. Returns the File-Like Object (TarVolume) along with its Manifest.
         If no previous plan is passed, it generates one.
         """
-        if plan is None:
-            plan = self.generate_plan()
+        with Catalog.from_directory(directory) as cat:
+            stats = cat.get_stats()
 
-        total_vols = len(plan)
+        fingerprint = stats["fingerprint"]
+        total_size = stats["total_size"]
+        segments = list(calculate_segments(total_size, self.chunk_size))
+        total_vols = len(segments)
         root_name = directory.name
 
-        padding_width = max(3, len(str(total_vols)))
         default_template = "{name}_{fingerprint:.8}.tar.{pindex}"
         template = naming_template or default_template
+        for vol_index, (vol_start, vol_end) in enumerate(segments):
+            with Catalog.from_directory(directory):
+                manifest = self.get_volume_manifest_for_range(
+                    fingerprint, vol_index, vol_start, vol_end
+                )
 
-        for manifest in plan:
-            net_name = self._resolve_volume_name(
+            filename = self._resolve_volume_name(
+                fingerprint=fingerprint,
                 root_name=root_name,
-                vol_index=manifest.volume_index,
+                vol_index=vol_index,
                 total_vols=total_vols,
                 template=template,
             )
 
             volume = FolderVolume(
                 directory=directory,
-                start_offset=manifest.start_offset,
-                end_offset=manifest.end_offset,
-                name=net_name,
+                manifest=manifest,
+                name=filename,
             )
             yield volume, manifest

@@ -2,7 +2,7 @@ import json
 import logging
 import shutil
 from pathlib import Path
-from typing import Generator, List, Optional, Tuple, Union
+from typing import Generator, List, Optional, Union
 
 import peewee
 
@@ -11,8 +11,7 @@ from tartape.catalog import Catalog
 from tartape.chunker import TarChunker
 from tartape.constants import TAPE_METADATA_DIR
 from tartape.models import Track
-from tartape.schemas import VolumeManifest
-from tartape.stream import FileVolume, FolderVolume, TapeVolume, TarStreamGenerator
+from tartape.stream import FolderVolume, TapeVolume, TarStreamGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -25,37 +24,36 @@ class Tape:
 
     def __init__(self, directory: Union[str, Path]):
         self.directory = Path(directory).resolve()
-        self._metadata_cache: dict[str, str] = {}
-        self._load_metadata()
+        self._stats = {}
+        self._refresh_metadata()
 
-    def _load_metadata(self):
-        if not tartape.exists(self.directory):
-            raise FileNotFoundError(f"The tape does not exist in: {self.directory}")
-        cat = tartape.get_catalog(self.directory)
-        self._metadata_cache = cat.get_metadata_snapshot()
+    def _refresh_metadata(self):
+        with Catalog.from_directory(self.directory) as cat:
+            self._stats = cat.get_stats()
+            self._track_count = cat.get_track_count()
 
     @property
     def count_files(self) -> int:
         """Returns the total number of files in the tape."""
-        return int(self._metadata_cache.get("count_files", 0))
+        return self._stats["total_size"]
 
     @property
     def fingerprint(self) -> str:
         """Returns the digital signature of the tape."""
-        return self._metadata_cache.get("fingerprint", "")
+        return self._stats["fingerprint"]
 
     @property
     def total_size(self) -> int:
         """Returns the total size that the TAR stream will have (bytes)."""
-        return int(self._metadata_cache.get("total_size", 0))
+        return self._stats["total_size"]
 
     @property
     def created_at(self) -> int:
-        return int(self._metadata_cache.get("created_at", 0))
+        return self._stats["created_at"]
 
     @property
     def exclude_patterns(self) -> List[str] | str:
-        value = self._metadata_cache.get("exclude_patterns", "")
+        value = self._stats["exclude_patterns"]
         try:
             return json.loads(value)
         except json.JSONDecodeError:
@@ -121,15 +119,12 @@ class Tape:
         track = catalog.get_track_at_offset(offset)
         track.validate_integrity(self.directory)
 
-    def iter_volumes(
-        self, size: int, naming_template: Optional[str] = None
-    ) -> Generator[Tuple[TapeVolume, VolumeManifest], None, None]:
+    def iter_volumes(self, size: int, naming_template: Optional[str] = None):
         """It breaks the tape down into logical and physical volumes."""
-        with tartape.get_catalog(self.directory):
-            chunker = TarChunker(chunk_size=size)
-            yield from chunker.iter_volumes(
-                self.directory, naming_template=naming_template
-            )
+        chunker = TarChunker(chunk_size=size)
+        yield from chunker.iter_volumes(
+            directory=self.directory, naming_template=naming_template
+        )
 
     def play(
         self,
@@ -153,24 +148,21 @@ class Tape:
             engine = TarStreamGenerator(track_loader(), self.directory)
             yield from engine.stream(start_offset=start_offset, chunk_size=chunk_size)
 
-        # with tartape.get_catalog(self.directory):
-        #     player = TapePlayer(self.directory)
-        #     yield from player.play(
-        #         start_offset=start_offset,
-        #         chunk_size=chunk_size,
-        #         fast_verify=fast_verify,
-        #     )
-
     def get_volume(
-        self, start: int, end: int, name: Optional[str] = None
+        self, vol_name: str, vol_index: int, vol_start: int, vol_end: int
     ) -> TapeVolume:
         if not tartape.exists(self.directory):
             raise FileNotFoundError(f"The tape does not exist in: {self.directory}")
 
-        name = name or self.directory.name
-        return FolderVolume(self.directory, start, end, name)
+        # Basic range validation
+        if vol_start < 0 or vol_end > self.total_size or vol_start >= vol_end:
+            raise ValueError(
+                f"Invalid range: {vol_start}-{vol_end}. Total tape size is {self.total_size}"
+            )
 
-    @classmethod
-    def get_file_volume(cls, path: Path, start: int, end: int, name: str):
-        """Instancia un volumen de un archivo plano."""
-        return FileVolume(path, start, end, name)
+        with Catalog.from_directory(self.directory):
+            manifest = TarChunker.get_volume_manifest_for_range(
+                self.fingerprint, vol_index, vol_start, vol_end
+            )
+
+        return FolderVolume(self.directory, manifest, vol_name)

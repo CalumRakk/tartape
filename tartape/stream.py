@@ -8,15 +8,16 @@ from tartape.exceptions import TarIntegrityError
 from tartape.header import TarHeader
 
 from .constants import CHUNK_SIZE_DEFAULT, TAR_BLOCK_SIZE, TAR_FOOTER_SIZE
-from .models import Track
 from .schemas import (
     FileEndMetadata,
     FileStartMetadata,
+    ManifestEntry,
     TarEvent,
     TarFileDataEvent,
     TarFileEndEvent,
     TarFileStartEvent,
     TarTapeCompletedEvent,
+    VolumeManifest,
 )
 
 logger = logging.getLogger(__name__)
@@ -37,7 +38,7 @@ class TapeVolume(io.BufferedIOBase):
 
 
 class TarStreamGenerator:
-    def __init__(self, entries: Iterable[Track], directory: str | Path):
+    def __init__(self, entries: Iterable[ManifestEntry], directory: str | Path):
         self.directory = Path(directory)
         self.entries = entries
 
@@ -78,11 +79,13 @@ class TarStreamGenerator:
         yield TarTapeCompletedEvent(type="tape_completed")
         logger.info("TAR stream completed successfully.")
 
-    def _build_header(self, track: Track) -> bytes:
-        header = TarHeader(track)
+    def _build_header(self, ManifestEntry: ManifestEntry) -> bytes:
+        header = TarHeader(ManifestEntry)
         return header.build()
 
-    def _create_event_start(self, entry: Track, global_skip: int) -> TarFileStartEvent:
+    def _create_event_start(
+        self, entry: ManifestEntry, global_skip: int
+    ) -> TarFileStartEvent:
         is_resumed = global_skip > entry.start_offset
         return TarFileStartEvent(
             type="file_start",
@@ -92,7 +95,9 @@ class TarStreamGenerator:
             ),
         )
 
-    def _create_event_end(self, entry: Track, md5: Optional[str]) -> TarFileEndEvent:
+    def _create_event_end(
+        self, entry: ManifestEntry, md5: Optional[str]
+    ) -> TarFileEndEvent:
 
         return TarFileEndEvent(
             type="file_end",
@@ -103,7 +108,7 @@ class TarStreamGenerator:
         )
 
     def _emit_header(
-        self, entry: Track, global_skip: int
+        self, entry: ManifestEntry, global_skip: int
     ) -> Generator[TarEvent, None, None]:
         local_skip, bytes_to_send = self._get_stream_window(
             global_skip, entry.start_offset, TAR_BLOCK_SIZE
@@ -134,7 +139,7 @@ class TarStreamGenerator:
         return local_skip, bytes_to_send
 
     def _stream_file_content_safely(
-        self, entry: Track, global_skip: int, chunk_size: int
+        self, entry: ManifestEntry, global_skip: int, chunk_size: int
     ) -> Generator[TarEvent, None, Optional[str]]:
         """Safely stream file content, ensuring that we do not read past the end of the file."""
 
@@ -177,7 +182,7 @@ class TarStreamGenerator:
         return md5.hexdigest() if md5 else None
 
     def _emit_padding(
-        self, entry: Track, global_skip: int
+        self, entry: ManifestEntry, global_skip: int
     ) -> Generator[TarEvent, None, None]:
         # Padding starts where the data ends and ends at end_offset
         padding_total = entry.end_offset - entry.content_end_offset
@@ -203,18 +208,16 @@ class FolderVolume(TapeVolume):
     def __init__(
         self,
         directory: Path,
-        start_offset: int,
-        end_offset: int,
+        manifest: "VolumeManifest",
         name: str,
     ):
-        super().__init__(name, end_offset - start_offset)
+        super().__init__(name, manifest.chunk_size)
         self.directory = directory
-        self.start_offset = start_offset
-        self.end_offset = end_offset
-        self.size = end_offset - start_offset
+        self.manifest = manifest
+        self.start_offset = manifest.start_offset
+        self.end_offset = manifest.end_offset
 
         # State
-        self._tape = None
         self._stream_gen = None
         self._position = 0
         self._buffer = bytearray()
@@ -233,21 +236,21 @@ class FolderVolume(TapeVolume):
         self._position = offset_in_volume
         self._buffer.clear()
 
+        if self._stream_gen:
+            self._stream_gen.close()
+
         if offset_in_volume == 0:
             self._md5 = hashlib.md5()
             self._hash_cursor = 0
             self._md5_invalid = False
-        else:
+        elif offset_in_volume != self._hash_cursor:
             # If we jump to the middle of the file, the MD5 hash can no longer be guaranteed.
             # Unless the jump is exactly to where the hash left off.
-            if offset_in_volume != self._hash_cursor:
-                self._md5_invalid = True
+            self._md5_invalid = True
 
         global_target = self.start_offset + offset_in_volume
-        if not self._tape:
-            raise RuntimeError("Tape not initialized.")
-
-        self._stream_gen = self._tape.play(start_offset=global_target, fast_verify=True)
+        engine = TarStreamGenerator(self.manifest.entries, self.directory)
+        self._stream_gen = engine.stream(start_offset=global_target)
 
     @property
     def md5sum(self) -> str:
@@ -267,22 +270,18 @@ class FolderVolume(TapeVolume):
         return self._position == self.size
 
     def __enter__(self):
-        from tartape.tape import Tape
-
-        if not self._closed:
-            return self
-        self._tape = Tape(self.directory)
         self._closed = False
         self._init_stream(0)
         return self
 
     def __exit__(self, *args):
         if self._stream_gen:
-            self._stream_gen.close()
-
-        self._closed = True
+            try:
+                self._stream_gen.close()
+            except Exception:
+                pass
         self._stream_gen = None
-        self._tape = None
+        self._closed = True
 
     def open(self):
         self.__enter__()
@@ -302,7 +301,8 @@ class FolderVolume(TapeVolume):
 
         while len(self._buffer) < bytes_to_read:
             try:
-                assert self._stream_gen is not None, "Stream generator not initialized"
+                if not self._stream_gen:
+                    raise
                 event = next(self._stream_gen)
                 if event.type == "file_data":
                     self._buffer.extend(event.data)

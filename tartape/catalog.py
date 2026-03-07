@@ -8,14 +8,25 @@ logger = logging.getLogger(__name__)
 
 
 class Catalog:
-    """
-    Represents a 'Master Catalog' (the .tape/database file).
-    It is the entry point for inspecting metadata and opening players.
-    """
-
     def __init__(self, db_path: str | Path):
         self.path = Path(db_path)
         self.db_session = DatabaseSession(self.path)
+
+    def get_stats(self) -> dict:
+        """
+        Query the DB and return a clean dictionary of metadata.
+        """
+        query = TapeMetadata.select()
+        stats = {m.key: m.value for m in query}
+        return {
+            "fingerprint": stats.get("fingerprint", ""),
+            "total_size": int(stats.get("total_size", 0)),
+            "created_at": int(stats.get("created_at", 0)),
+            "exclude_patterns": stats.get("exclude_patterns", ""),
+        }
+
+    def get_track_count(self) -> int:
+        return Track.select().count()
 
     def get_track_at_offset(self, offset: int) -> Track:
         """Find the track that contains a specific offset."""
@@ -35,15 +46,6 @@ class Catalog:
             .iterator()
         )
 
-    def get_metadata_snapshot(self) -> dict[str, str]:
-        "Load all the metadata into a dictionary and close the connection."
-        snapshot = {}
-        with self.db_session as db:
-            query = TapeMetadata.select()
-            for meta in query:
-                snapshot[meta.key] = meta.value
-        return snapshot
-
     def open(self):
         """Open the connection to the tape database."""
         return self.__enter__()
@@ -58,3 +60,14 @@ class Catalog:
     def __enter__(self):
         self.db_session.connect()
         return self
+
+    @classmethod
+    def from_directory(cls, directory: str | Path) -> "Catalog":
+        from tartape import discover
+
+        db_path = discover(directory)
+
+        if not db_path:
+            raise FileNotFoundError(f"TarTape index not found in: {directory}")
+
+        return cls(db_path)
