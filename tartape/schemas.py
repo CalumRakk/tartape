@@ -103,15 +103,16 @@ class ByteWindow:
 
     @property
     def size(self) -> int:
+        """The size of the window in bytes."""
         return self.end - self.start
 
     def contains(self, offset: int) -> bool:
+        """Check if an offset is within the window."""
         return self.start <= offset < self.end
 
     def intersects(self, other_start: int, other_end: int) -> bool:
         """Check if a file's byte range overlaps with this window."""
         return other_start < self.end and other_end > self.start
-
 
 @dataclass(frozen=True)
 class EntryMetadata:
