@@ -5,6 +5,7 @@ import stat as stat_module
 from pathlib import Path
 from typing import Callable, List, Optional, Union
 
+from tartape.constants import TAPE_METADATA_DIR
 from tartape.exceptions import TarIntegrityError
 from tartape.models import Track
 from tartape.schemas import DiskEntryStats, EntryMetadata
@@ -168,3 +169,32 @@ def validate_integrity(
     if not expected.is_symlink:
         if stats.size != expected.size:
             raise TarIntegrityError(f"File size changed: {expected.arc_path}")
+
+
+def validate_root_structure_integrity(root_path: Path) -> None:
+    """
+    Checks if the root directory structure has been compromised by adding
+    new untracked items. This complements ADR-002, where the root
+    mtime is ignored.
+    """
+    try:
+        disk_items_count = 0
+        with os.scandir(root_path) as it:
+            for entry in it:
+                if entry.name != TAPE_METADATA_DIR:
+                    disk_items_count += 1
+    except OSError as e:
+        raise TarIntegrityError(f"Root directory is inaccessible: {e}")
+
+    db_items_count = (
+        Track.select()
+        .where((Track.rel_path != "") & (~Track.rel_path.contains("/")))  # type: ignore
+        .count()
+    )
+
+    if disk_items_count > db_items_count:
+        diff = disk_items_count - db_items_count
+        raise TarIntegrityError(
+            f"Integrity compromised: {diff} untracked item(s) detected in root directory. "
+            f"The dataset no longer matches the T0 snapshot."
+        )

@@ -10,7 +10,7 @@ import tartape
 from tartape.catalog import Catalog
 from tartape.chunker import TarChunker
 from tartape.constants import TAPE_METADATA_DIR
-from tartape.factory import validate_integrity
+from tartape.factory import validate_integrity, validate_root_structure_integrity
 from tartape.models import Track
 from tartape.schemas import ByteWindow, ManifestEntry
 from tartape.stream import FolderVolume, TapeVolume, TarStreamGenerator
@@ -81,7 +81,9 @@ class Tape:
     def verify(self, deep: bool = False, raise_exception: bool = False):
         """Check the integrity of the tape."""
         try:
-            with tartape.get_catalog(self.directory) as cat:
+            with tartape.get_catalog(self.directory):
+                validate_root_structure_integrity(self.directory)
+
                 if deep:
                     for track in Track.select().order_by(Track.arc_path).iterator():
                         validate_integrity(track, self.directory)

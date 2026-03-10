@@ -1,7 +1,6 @@
 __version__ = "2.2.0b"
 __copyright__ = "Copyright (C) 2026-present CalumRakk <https://github.com/CalumRakk>"
 
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -60,14 +59,9 @@ def get_catalog(directory: str | Path) -> Catalog:
     return Catalog(db_path)
 
 
-@contextmanager
-def open_volume(path: str | Path, start: int, end: int, name: Optional[str] = None):
-    name = name or Path(path).name
-    if exists(path):
-        tape = Tape(path)
-        volumen = tape.get_volume(start, end, name)
-        with volumen as v:
-            yield v
+def get_tape(directory: str | Path) -> Optional[Tape]:
+    if exists(directory):
+        return Tape(directory)
 
 
-__all__ = ["Tape", "create", "discover", "exists", "get_catalog", "open_volume"]
+__all__ = ["Tape", "create", "discover", "exists", "get_catalog", "get_tape"]
