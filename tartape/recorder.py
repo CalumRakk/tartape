@@ -37,7 +37,10 @@ class TapeRecorder:
         self.tape_db_path = self.directory / TAPE_METADATA_DIR / TAPE_DB_NAME
 
         if self.tape_db_path.exists():
-            raise FileExistsError(f"Catalog already exists at: {self.tape_db_path}")
+            raise FileExistsError(
+                f"Catalog already exists at: {self.tape_db_path}. "
+                "Use overwrite=True in create() to force a new recording."
+            )
 
         self._temp_dir = tempfile.TemporaryDirectory()
         self._temp_path = Path(self._temp_dir.name) / TAPE_DB_NAME

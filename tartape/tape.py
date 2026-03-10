@@ -94,9 +94,9 @@ class Tape:
                         for track in samples:
                             validate_integrity(track, self.directory)
                 return True
-        except Exception:
+        except Exception as e:
             if raise_exception:
-                raise
+                raise e
             return False
 
     def _verify_resume_point_integrity(self, catalog: Catalog, absolute_offset: int):
