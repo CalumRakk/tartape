@@ -36,6 +36,30 @@ class TarEntryFactory:
     """
 
     @staticmethod
+    def validate_path_constraints(arcname: str):
+        """
+        Validates ADR-005 constraints during the recording phase.
+        Ensures that the path will be compatible with USTAR and TarTape
+        before adding it to the catalog.
+        """
+        path_bytes = arcname.encode("utf-8")
+
+        # USTAR absolute limit
+        if len(path_bytes) > 255:
+            raise ValueError(
+                f"Path too long ({len(path_bytes)} bytes). Max 255 allowed by USTAR."
+            )
+
+        # ADR-005: Component limit (100 bytes)
+        components = arcname.split("/")
+        for component in components:
+            if len(component.encode("utf-8")) > 100:
+                raise ValueError(
+                    f"ADR-005 Violation: Path component '{component}' exceeds 100 bytes. "
+                    "This is required to ensure directory metadata integrity."
+                )
+
+    @staticmethod
     def calculate_md5(path: Path) -> str:
         """Calculate the MD5 hash of a file in 64 KB blocks."""
         hash_md5 = hashlib.md5()
@@ -102,6 +126,8 @@ class TarEntryFactory:
         Returns None if the file is an unsupported type (Socket, Pipe, etc).
         Raises OSError/FileNotFoundError if there are access issues.
         """
+        cls.validate_path_constraints(arcname)
+
         path = Path(source_path)
         stats = cls.inspect(path)
 

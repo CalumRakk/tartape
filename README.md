@@ -1,15 +1,16 @@
 # TarTape
 
-**TarTape** is a streaming engine designed to turn massive directories into deterministic TAR archives on-the-fly, without requiring intermediate storage.
+**TarTape** is a Python streaming library that generates deterministic TAR archives on-the-fly, transmitting directory contents without requiring intermediate local storage.
 
 It is purpose-built for **cloud-native backups and large-scale data movement** where you need to stream terabytes of data directly to remote storage (S3, Azure, GCP). It eliminates the need to duplicate local disk space and provides the unique ability to resume failed uploads instantly from the exact byte they stopped.
 
-### Why is it useful?
-*   **Zero-Copy Streaming:** Generates the TAR stream "in-flight" while transmitting. If your dataset is 100GB, you transmit 100GB without using a single extra GB of local cache.
-*   **Byte-Level Resume:** If a 500GB upload fails at 80%, TarTape knows exactly at which byte the error occurred. You can resume the stream from that specific offset without re-scanning the source.
-*   **Logical Volume Slicing:** Easily split a massive stream into fixed-size volumes (e.g., 5GB parts) to meet cloud provider upload limits, while maintaining a single valid TAR structure.
-*   **Stream Navigation:** Jump to any file or offset within the resulting archive without having to process or read the preceding data.
+### Key Features
 
+*   **On-the-Fly Archiving:** Generates the TAR stream directly in memory during transmission. It processes files in chunks, eliminating the need for local disk space to store the final archive.
+*   **Deterministic Output:** Ensures that the same source files always produce the exact same byte sequence and hash, regardless of the host machine or user environment.
+*   **Byte-Level Resumption:** Allows interrupted transfers to be resumed from an exact byte offset. The engine performs a quick metadata check to ensure source files haven't changed, avoiding the need to re-read previously transmitted data.
+*   **Strict Integrity:** Monitors file state safely. If a source file is modified after the initial scan, the stream aborts automatically to prevent generating a corrupted or misaligned archive.
+*   **Logical Volume Slicing:** Exposes the continuous TAR stream as a sequence of fixed-size, file-like objects, making it easy to integrate with multipart upload APIs (like AWS S3 or Azure Blobs).
 
 ---
 
@@ -35,14 +36,15 @@ print(f"Fingerprint: {tape.fingerprint}")
 print(f"Total stream size: {tape.total_size} bytes")
 ```
 
-### 2. Direct Streaming (Single-file Upload)
-If you don't need to split the archive, you can consume the byte stream directly.
+### 2. Basic Streaming
+You can consume the TAR archive as a raw byte generator, ideal for HTTP uploads or socket transmissions.
 
 ```python
 import requests
 import tartape
 
-tape = tartape.Tape("./massive_dataset")
+# Retrieve the previously recorded tape
+tape = tartape.get_tape("./massive_dataset")
 
 def data_generator():
     # 'play' emits events. We filter for 'file_data' to get raw bytes.
@@ -58,25 +60,33 @@ requests.put("https://storage.com/backup.tar", data=data_generator())
 Ideal for services like AWS S3 or Azure Blobs that prefer fixed-size parts.
 
 ```python
+import tartape
+
+tape = tartape.get_tape("./massive_dataset")
 
 # Split the stream into 1GB logical volumes
-for volume, manifest in Tape("./massive_dataset").iter_volumes(size=1024**3):
+for volume, manifest in tape.iter_volumes(size=1024**3):
     # 'volume' behaves like an open file (read, seek, tell)
-    upload_to_s3(key=volume.name, body=volume)
+    # It must be used as a context manager to initialize the stream properly
+    with volume:
+        upload_to_s3(key=volume.name, body=volume)
 ```
 
 ### 4. Byte-Perfect Resume
 If a transfer is interrupted, you can resume it from the exact byte where it left off.
 
 ```python
+import tartape
+
 # Suppose logs indicate that 45,678,912 bytes were sent before the error
 LAST_BYTE_SENT = 45678912
 
-with tartape.open("./massive_dataset") as tape:
-    # 'play' will instantly jump to the requested offset
-    for event in tape.play(start_offset=LAST_BYTE_SENT):
-        if event.type == "file_data":
-            socket.send(event.data)
+tape = tartape.get_tape("./massive_dataset")
+
+# 'play' will instantly jump to the requested offset without re-reading previous files
+for event in tape.play(start_offset=LAST_BYTE_SENT):
+    if event.type == "file_data":
+        socket.send(event.data)
 ```
 
 ### 5. Integrity Verification

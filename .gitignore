@@ -4,3 +4,4 @@ script.py
 *.egg-info
 venv_test/
 .contextignore
+build/
