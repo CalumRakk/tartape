@@ -219,22 +219,26 @@ class FolderVolume(TapeVolume):
         self.start_offset = manifest.start_offset
         self.end_offset = manifest.end_offset
 
-        # State
+        # Streaming state
         self._stream_gen = None
         self._position = 0
         self._buffer = bytearray()
         self._closed = True
 
-        # Hash Status
+        # Integrity/Hashing state
         self._md5 = hashlib.md5()
         self._hash_cursor = 0
-        self._md5_invalid = False
+        self._integrity_broken = False
+        self._final_md5 = None
 
     def _ensure_not_closed(self):
         if self._closed:
             raise ValueError("I/O operation on closed volume.")
 
     def _init_stream(self, offset_in_volume: int):
+        """
+        Initializes or restarts the stream generator at a specific offset.
+        """
         self._position = offset_in_volume
         self._buffer.clear()
 
@@ -244,28 +248,63 @@ class FolderVolume(TapeVolume):
         if offset_in_volume == 0:
             self._md5 = hashlib.md5()
             self._hash_cursor = 0
-            self._md5_invalid = False
+            self._integrity_broken = False
+            logger.debug(f"Linear hash initialized for volume {self.name}")
+
+        # If the seek target doesn't match where our hashing left off,
+        # we mark the linear hash as compromised.
         elif offset_in_volume != self._hash_cursor:
-            # If we jump to the middle of the file, the MD5 hash can no longer be guaranteed.
-            # Unless the jump is exactly to where the hash left off.
-            self._md5_invalid = True
+            self._integrity_broken = True
+            logger.warning(
+                f"Non-linear seek detected in {self.name}. "
+                f"Position: {offset_in_volume}, Hash Cursor: {self._hash_cursor}. "
+                "Linear MD5 calculation is now disabled for this pass."
+            )
 
         global_target = self.start_offset + offset_in_volume
         engine = TarStreamGenerator(self.manifest.entries, self.directory)
         self._stream_gen = engine.stream(start_offset=global_target)
 
+    def _calculate_manually(self) -> str:
+        logger.info(f"Performing manual MD5 pass for volume: {self.name}")
+        hasher = hashlib.md5()
+
+        engine = TarStreamGenerator(self.manifest.entries, self.directory)
+        stream = engine.stream(start_offset=self.start_offset)
+
+        bytes_hashed = 0
+        for event in stream:
+            if bytes_hashed >= self.size:
+                break
+
+            if event.type == "file_data":
+                data = event.data
+                remaining_in_volume = self.size - bytes_hashed
+
+                # If the current chunk exceeds the volume boundary, we slice it
+                if len(data) > remaining_in_volume:
+                    data = data[:remaining_in_volume]
+
+                hasher.update(data)
+                bytes_hashed += len(data)
+
+        return hasher.hexdigest()
+
     @property
     def md5sum(self) -> str:
-        if self._md5_invalid:
-            raise RuntimeError(
-                f"MD5 not available for '{self.name}': Non-linear read detected"
-                "(jumps with seek). To obtain the MD5 hash, the file must be read sequentially."
-            )
-        if self._hash_cursor < self.size:
-            raise RuntimeError(
-                f"MD5 not available: Incomplete read ({self._hash_cursor}/{self.size})."
-            )
-        return self._md5.hexdigest()
+        """
+        Returns the MD5 hash. Uses the linear calculation if possible,
+        otherwise falls back to manual calculation.
+        """
+        if self._final_md5:
+            return self._final_md5
+
+        if not self._integrity_broken and self._hash_cursor == self.size:
+            self._final_md5 = self._md5.hexdigest()
+            return self._final_md5
+
+        self._final_md5 = self._calculate_manually()
+        return self._final_md5
 
     @property
     def is_completed(self) -> bool:
@@ -278,11 +317,7 @@ class FolderVolume(TapeVolume):
 
     def __exit__(self, *args):
         if self._stream_gen:
-            try:
-                self._stream_gen.close()
-            except Exception:
-                pass
-        self._stream_gen = None
+            self._stream_gen.close()
         self._closed = True
 
     def open(self):
@@ -317,24 +352,21 @@ class FolderVolume(TapeVolume):
         chunk = bytes(self._buffer[:chunk_size])
         self._buffer = self._buffer[chunk_size:]
 
-        if not self._md5_invalid:
+        if not self._integrity_broken:
             # If the read cursor matches the hash cursor, we continue processing
             if self._position == self._hash_cursor:
                 self._md5.update(chunk)
                 self._hash_cursor += len(chunk)
             else:
                 # The developer read something out of linear order
-                self._md5_invalid = True
+                self._integrity_broken = True
 
         self._position += len(chunk)
         return chunk
 
     def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
-        """
-        Supports jumping to the beginning (rewind) and the end (so that libraries like requests can calculate the Content-Length).
-        """
         self._ensure_not_closed()
-        target = 0
+
         if whence == io.SEEK_SET:
             target = offset
         elif whence == io.SEEK_CUR:
@@ -342,22 +374,15 @@ class FolderVolume(TapeVolume):
         elif whence == io.SEEK_END:
             target = self.size + offset
         else:
-            raise ValueError("whence inválido")
+            raise ValueError("Invalid whence")
 
-        target = max(0, min(target, self.size))
+        if target < 0 or target > self.size:
+            raise ValueError(f"Seek position {target} is out of bounds (0-{self.size})")
 
         if target == self._position:
             return self._position
 
-        if target == 0:
-            self._init_stream(0)
-        else:
-            # Arbitrary jump: restart the engine at the new point
-            # The MD5 hash will be marked as invalid in the next read() if it's not linear
-            self._init_stream(target)
-            if target != self._hash_cursor:
-                self._md5_invalid = True
-
+        self._init_stream(target)
         return self._position
 
     def tell(self) -> int:
