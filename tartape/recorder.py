@@ -29,6 +29,12 @@ class TapeRecorder:
     ):
         self.directory = Path(directory).resolve()
         self.calculate_hashes = calculate_hashes
+        if self.calculate_hashes:
+            logger.info(
+                "Hash calculation is ENABLED. The engine will read the entire "
+                "dataset to compute MD5 sums during recording. "
+                "This may take a significant amount of time for massive datasets."
+            )
         if not self.directory.is_dir():
             raise ValueError(f"Root path '{directory}' must be a directory.")
 
@@ -140,21 +146,36 @@ class TapeRecorder:
         while stack:
             curr_dir, arc_prefix = stack.pop()
             try:
-                entries = sorted(os.listdir(curr_dir))
-                for name in entries:
-                    full_path = curr_dir / name
-                    if self._should_exclude(full_path):
-                        continue
+                # os.scandir to retrieve DirEntry objects which cache the stat() call
+                with os.scandir(curr_dir) as it:
+                    # Sort them to guarantee deterministic ordering (ADR-001)
+                    entries = sorted(list(it), key=lambda e: e.name)
+                    for entry in entries:
+                        full_path = Path(entry.path)
 
-                    arc_name = f"{arc_prefix}/{name}"
-                    self._add_to_buffer(full_path, arcname=arc_name)
+                        if self._should_exclude(full_path):
+                            continue
 
-                    if full_path.is_dir() and not full_path.is_symlink():
-                        stack.append((full_path, arc_name))
+                        arc_name = f"{arc_prefix}/{entry.name}"
+
+                        # Retrieve the cached stat information to avoid a redundant disk syscall
+                        cached_stat = entry.stat(follow_symlinks=False)
+
+
+                        self._add_to_buffer(
+                            full_path,
+                            arcname=arc_name,
+                            precomputed_stat=cached_stat
+                        )
+
+                        # Check if it's a directory using the fast cached method
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append((full_path, arc_name))
+
             except PermissionError:
                 logger.warning(f"Permission denied: {curr_dir}")
 
-    def _add_to_buffer(self, source_path: Path, arcname: str):
+    def _add_to_buffer(self, source_path: Path, arcname: str, precomputed_stat: Optional[os.stat_result] = None):
         """Parses a file and adds it to the insert buffer."""
 
         rel_path = source_path.relative_to(self.directory).as_posix()
@@ -167,6 +188,7 @@ class TapeRecorder:
             rel_path=rel_path,
             anonymize=self.anonymize,
             calculate_hash=self.calculate_hashes,
+            precomputed_stat=precomputed_stat,
         )
 
         if metadata:

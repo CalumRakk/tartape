@@ -5,3 +5,6 @@ script.py
 venv_test/
 .contextignore
 build/
+determinism_test_data.py
+determinism_test_data/
+docs/internal/

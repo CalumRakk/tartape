@@ -30,7 +30,7 @@ class TarEntryFactory:
     and instantiating valid TarEntry objects.
 
     Centralizes:
-    1. Usage of lstat (to avoid following symlinks).
+    1. Usage of lstat (to avoid following symlinks).f
     2. Type filtering (Only File, Dir, Link are supported).
     3. Metadata extraction (Users, Groups, Permissions).
     """
@@ -69,10 +69,13 @@ class TarEntryFactory:
         return hash_md5.hexdigest()
 
     @staticmethod
-    def inspect(path: Path) -> DiskEntryStats:
-        """Performs low-level lstat on the path and returns raw stats."""
+    def inspect(path: Path, precomputed_stat: Optional[os.stat_result] = None) -> DiskEntryStats:
+        """
+        Performs low-level lstat on the path, or uses a precomputed stat result
+        (e.g., from os.scandir) to avoid redundant syscalls.
+        """
         try:
-            st = path.lstat()
+            st = precomputed_stat if precomputed_stat else path.lstat()
 
             # Extract only the permission bits (0o755, 0o644, etc.)
             permissions = stat_module.S_IMODE(st.st_mode)
@@ -120,16 +123,19 @@ class TarEntryFactory:
         arcname: str,
         anonymize: bool = True,
         calculate_hash: bool = False,
+        precomputed_stat: Optional[os.stat_result] = None,
     ) -> Optional[EntryMetadata]:
         """
         Analyzes a path and creates a TarEntry.
+        Accepts a precomputed_stat to avoid double stat syscalls during discovery.
+
         Returns None if the file is an unsupported type (Socket, Pipe, etc).
         Raises OSError/FileNotFoundError if there are access issues.
         """
         cls.validate_path_constraints(arcname)
 
         path = Path(source_path)
-        stats = cls.inspect(path)
+        stats = cls.inspect(path, precomputed_stat=precomputed_stat)
 
         if not stats.exists or not (stats.is_dir or stats.is_file or stats.is_symlink):
             return None
@@ -149,12 +155,14 @@ class TarEntryFactory:
         if calculate_hash and stats.is_file:
             md5_value = cls.calculate_md5(Path(source_path))
 
+        final_mode = cls.normalize_mode(stats, anonymize)
+
         return EntryMetadata(
             arc_path=arcname,
             rel_path=rel_path,
             size=effective_size,
             mtime=int(stats.mtime),
-            mode=stats.mode,
+            mode=final_mode,
             uid=uid,
             gid=gid,
             uname=uname,
@@ -164,7 +172,32 @@ class TarEntryFactory:
             linkname=linkname,
             md5sum=md5_value,
         )
+    @staticmethod
+    def normalize_mode(stats: DiskEntryStats, anonymize: bool) -> int:
+        """
+        Normalizes POSIX permissions to ensure cross-platform determinism.
 
+        Why: Windows emulates permissions as 0o666 (rw-rw-rw-) for most files,
+        while Linux typically uses 0o644 (rw-r--r--). This discrepancy breaks
+        the MD5 hash.
+        """
+        if not anonymize:
+            return stats.mode
+
+        if stats.is_dir:
+            return 0o755
+
+        if stats.is_symlink:
+            return 0o777
+
+        # 'Execution Intent' detection:
+        # Works by checking the executable bit (0o111) which Python emulates
+        # on Windows based on file extensions (.exe, .bat, etc.) and reads
+        # natively on Linux.
+        is_executable = (stats.mode & 0o111) != 0
+
+        # We snap to a clean POSIX standard to eliminate environmental noise.
+        return 0o755 if is_executable else 0o644
 
 def validate_integrity(
     expected: EntryMetadata | Track, tape_root_directory: Path
