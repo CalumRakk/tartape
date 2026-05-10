@@ -14,6 +14,10 @@ class PathConstraintError(TarTapeError, ValueError):
     """Exception raised when a path violates USTAR or TarTape ADR-005 constraints."""
     pass
 
+class PathConstraintReportError(TarTapeError, ValueError):
+    """Exception raised at the end of discovery with a full report of path violations."""
+    pass
+
 class InvalidOffsetError(TarTapeError, ValueError):
     """Exception raised when an invalid byte offset or byte window is requested."""
     pass

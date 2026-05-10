@@ -26,6 +26,35 @@ ExcludeType = Union[str, List[str], Callable[[Path], bool]]
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
+def truncate_component_safe(component: str, max_bytes: int = 100) -> str:
+    """
+    Truncates a path component to a maximum byte length, ensuring
+    UTF-8 validity and preventing name collisions via hashing.
+    """
+    comp_bytes = component.encode("utf-8")
+
+    if len(comp_bytes) <= max_bytes:
+        return component
+
+    hash_suffix = hashlib.md5(comp_bytes).hexdigest()[:14]
+    limit_for_prefix = max_bytes - 15
+
+    prefix_bytes = comp_bytes[:limit_for_prefix]
+
+    # Decode back to string. 'ignore' is crucial: if byte 85 was the
+    # start of a 4-byte emoji, it will be dropped, preventing
+    # "Invalid UTF-8" errors.
+    safe_prefix = prefix_bytes.decode("utf-8", errors="ignore")
+
+    result = f"{safe_prefix}_{hash_suffix}"
+
+    # If this fails, we decrease the prefix length further.
+    # This handles edge cases with certain multi-byte combining characters.
+    while len(result.encode("utf-8")) > max_bytes:
+        safe_prefix = safe_prefix[:-1]
+        result = f"{safe_prefix}_{hash_suffix}"
+
+    return result
 
 class TarEntryFactory:
     """
@@ -37,6 +66,37 @@ class TarEntryFactory:
     2. Type filtering (Only File, Dir, Link are supported).
     3. Metadata extraction (Users, Groups, Permissions).
     """
+
+    @staticmethod
+    def resolve_arcname(arcname: str, auto_truncate: bool = False) -> str:
+        """
+        Validates ADR-005 constraints or truncates if auto_truncate is True.
+        Returns the final valid archive path (arcname).
+        """
+        components = arcname.split("/")
+        final_components = []
+
+        for component in components:
+            resolved = component
+            if len(component.encode("utf-8")) > 100:
+                if auto_truncate:
+                    resolved = truncate_component_safe(component, 100)
+                else:
+                    raise PathConstraintError(f"Component too long: {component}")
+
+            # No component should EVER leave this method exceeding 100 bytes if we are in this engine.
+            if len(resolved.encode("utf-8")) > 100:
+                raise PathConstraintError(
+                    f"Critical failure: Component '{resolved}' still exceeds 100 bytes "
+                    "after resolution logic."
+                )
+            final_components.append(resolved)
+
+        final_path = "/".join(final_components)
+        if len(final_path.encode("utf-8")) > 255:
+            raise PathConstraintError("Total path exceeds USTAR 255 byte limit.")
+
+        return final_path
 
     @staticmethod
     def validate_path_constraints(arcname: str):
@@ -136,7 +196,6 @@ class TarEntryFactory:
         Returns None if the file is an unsupported type (Socket, Pipe, etc).
         Raises OSError/FileNotFoundError if there are access issues.
         """
-        cls.validate_path_constraints(arcname)
 
         path = Path(source_path)
         stats = cls.inspect(path, precomputed_stat=precomputed_stat)

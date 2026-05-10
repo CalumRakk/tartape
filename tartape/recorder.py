@@ -11,6 +11,7 @@ from typing import Iterable, Optional, cast
 from tartape.cache import HashCacheManager
 from tartape.constants import TAPE_DB_NAME, TAPE_METADATA_DIR
 from tartape.database import DatabaseSession
+from tartape.exceptions import PathConstraintError, PathConstraintReportError
 from tartape.factory import ExcludeType, TarEntryFactory
 from tartape.schemas import EntryMetadata
 
@@ -27,10 +28,12 @@ class TapeRecorder:
         exclude: Optional[ExcludeType] = None,
         anonymize: bool = True,
         calculate_hashes: bool = False,
+        auto_truncate: bool = False,
     ):
         self.directory = Path(directory).resolve()
         self.calculate_hashes = calculate_hashes
         self.cache: Optional[HashCacheManager] = None
+        self.auto_truncate = auto_truncate
 
         if self.calculate_hashes:
             logger.info(
@@ -145,11 +148,23 @@ class TapeRecorder:
 
     def _run_discovery(self):
         """Scans the filesystem in a deterministic manner."""
+        path_violations = []
+        # Validate the root folder name itself
+        try:
+            safe_root_name = TarEntryFactory.resolve_arcname(
+                self.directory.name, auto_truncate=self.auto_truncate
+            )
+        except PathConstraintError:
+            path_violations.append(str(self.directory))
+            safe_root_name = self.directory.name
 
-        self._add_to_buffer(self.directory, arcname=self.directory.name)
+        if not path_violations:
+            self._add_to_buffer(self.directory, arcname=safe_root_name)
+            stack = [(self.directory, safe_root_name)]
+        else:
+            stack = [] # Skip discovery if the root itself fails and is not truncated
 
-        # sorted(os.listdir) to guarantee order before the database
-        stack = [(self.directory, self.directory.name)]
+
 
         while stack:
             curr_dir, arc_prefix = stack.pop()
@@ -164,24 +179,47 @@ class TapeRecorder:
                         if self._should_exclude(full_path):
                             continue
 
-                        arc_name = f"{arc_prefix}/{entry.name}"
+                        raw_arc_name = f"{arc_prefix}/{entry.name}"
+
+                        try:
+                            safe_arc_name = TarEntryFactory.resolve_arcname(
+                                raw_arc_name, auto_truncate=self.auto_truncate
+                            )
+                        except PathConstraintError:
+                            # Accumulate error and skip adding this file/folder
+                            path_violations.append(str(full_path))
+                            continue
 
                         # Retrieve the cached stat information to avoid a redundant disk syscall
                         cached_stat = entry.stat(follow_symlinks=False)
 
-
                         self._add_to_buffer(
                             full_path,
-                            arcname=arc_name,
+                            arcname=safe_arc_name,
                             precomputed_stat=cached_stat
                         )
 
                         # Check if it's a directory using the fast cached method
                         if entry.is_dir(follow_symlinks=False):
-                            stack.append((full_path, arc_name))
+                            stack.append((full_path, safe_arc_name))
 
             except PermissionError:
                 logger.warning(f"Permission denied: {curr_dir}")
+
+        # REPORT ALL VIOLATIONS AT ONCE
+        if path_violations:
+            # We show up to 50 to avoid crashing the console with massive strings
+            display_violations = path_violations[:50]
+            report = "\n  - ".join(display_violations)
+            if len(path_violations) > 50:
+                report += f"\n  ... and {len(path_violations) - 50} more."
+
+            raise PathConstraintReportError(
+                f"Discovery aborted. {len(path_violations)} path(s) violate USTAR limitations "
+                "(Max 255 total bytes or 100 bytes per folder/file name):\n"
+                f"  - {report}\n\n"
+                "To automatically shorten these paths and prevent collisions, use 'auto_truncate=True' in create()."
+            )
 
     def _add_to_buffer(self, source_path: Path, arcname: str, precomputed_stat: Optional[os.stat_result] = None):
         """Parses a file and adds it to the insert buffer."""
