@@ -10,6 +10,12 @@ import tartape
 from tartape.catalog import Catalog
 from tartape.chunker import TarChunker
 from tartape.constants import TAPE_METADATA_DIR
+from tartape.exceptions import (
+    InvalidOffsetError,
+    TapeNotFoundError,
+    TapeVerificationError,
+    TarIntegrityError,
+)
 from tartape.factory import validate_integrity, validate_root_structure_integrity
 from tartape.models import Track
 from tartape.schemas import ByteWindow, ManifestEntry
@@ -79,7 +85,13 @@ class Tape:
             shutil.rmtree(metadata_dir)
 
     def verify(self, deep: bool = False, raise_exception: bool = False):
-        """Check the integrity of the tape."""
+        """Returns True if the tape is valid, False otherwise
+
+        Exceptions:
+        - TarIntegrityError: If the tape fails integrity checks (only raised if raise_exception=True
+        - TapeVerificationError: If an unexpected error occurs during verification (only raised if raise_exception=True)
+
+        """
         try:
             with tartape.get_catalog(self.directory):
                 validate_root_structure_integrity(self.directory)
@@ -94,9 +106,15 @@ class Tape:
                         for track in samples:
                             validate_integrity(track, self.directory)
                 return True
-        except Exception as e:
+        except TarIntegrityError:
+            # Let our specific integrity error bubble up if requested
             if raise_exception:
-                raise e
+                raise
+            return False
+        except Exception as e:
+            # Wrap any other unexpected errors (OS errors, DB errors)
+            if raise_exception:
+                raise TapeVerificationError(f"Unexpected error during verification: {e}") from e
             return False
 
     def _verify_resume_point_integrity(self, catalog: Catalog, absolute_offset: int):
@@ -108,7 +126,7 @@ class Tape:
         """
 
         if absolute_offset < 0 or absolute_offset >= self.total_size:
-            raise ValueError(f"Invalid resume offset: {absolute_offset}")
+            raise InvalidOffsetError(f"Invalid resume offset: {absolute_offset}")
 
         # The 'Footer Zone' (last 1024 bytes) has no files, it's just padding.
         if absolute_offset >= self.total_size - 1024:
@@ -152,11 +170,11 @@ class Tape:
         self, vol_name: str, vol_index: int, vol_start: int, vol_end: int
     ) -> TapeVolume:
         if not tartape.exists(self.directory):
-            raise FileNotFoundError(f"The tape does not exist in: {self.directory}")
+            raise TapeNotFoundError(f"The tape does not exist in: {self.directory}")
 
         volume_window = ByteWindow(start=vol_start, end=vol_end)
         if vol_start < 0 or vol_end > self.total_size or vol_start >= vol_end:
-            raise ValueError(
+            raise InvalidOffsetError(
                 f"Invalid range: {vol_start}-{vol_end}. Total tape size is {self.total_size}"
             )
 

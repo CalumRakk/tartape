@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable, List, Optional, Union
 
 from tartape.constants import TAPE_METADATA_DIR
-from tartape.exceptions import TarIntegrityError
+from tartape.exceptions import PathConstraintError, TarIntegrityError
 from tartape.models import Track
 from tartape.schemas import DiskEntryStats, EntryMetadata
 
@@ -49,7 +49,7 @@ class TarEntryFactory:
 
         # USTAR absolute limit
         if len(path_bytes) > 255:
-            raise ValueError(
+            raise PathConstraintError(
                 f"Path too long ({len(path_bytes)} bytes). Max 255 allowed by USTAR."
             )
 
@@ -57,7 +57,7 @@ class TarEntryFactory:
         components = arcname.split("/")
         for component in components:
             if len(component.encode("utf-8")) > 100:
-                raise ValueError(
+                raise PathConstraintError(
                     f"ADR-005 Violation: Path component '{component}' exceeds 100 bytes. "
                     "This is required to ensure directory metadata integrity."
                 )

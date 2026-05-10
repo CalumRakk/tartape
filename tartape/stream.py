@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 from typing import Generator, Iterable, Optional
 
-from tartape.exceptions import TarIntegrityError
+from tartape.exceptions import InvalidOffsetError, TarIntegrityError, VolumeStateError
 from tartape.factory import validate_integrity
 from tartape.header import TarHeader
 
@@ -233,7 +233,7 @@ class FolderVolume(TapeVolume):
 
     def _ensure_not_closed(self):
         if self._closed:
-            raise ValueError("I/O operation on closed volume.")
+            raise VolumeStateError("I/O operation on closed volume.")
 
     def _init_stream(self, offset_in_volume: int):
         """
@@ -377,7 +377,7 @@ class FolderVolume(TapeVolume):
             raise ValueError("Invalid whence")
 
         if target < 0 or target > self.size:
-            raise ValueError(f"Seek position {target} is out of bounds (0-{self.size})")
+            raise InvalidOffsetError(f"Seek position {target} is out of bounds (0-{self.size})")
 
         if target == self._position:
             return self._position

@@ -2,6 +2,8 @@ import logging
 from pathlib import Path
 from typing import Iterable
 
+from tartape.exceptions import InvalidOffsetError, TapeNotFoundError
+
 from .database import DatabaseSession
 from .models import TapeMetadata, Track
 
@@ -40,7 +42,7 @@ class Catalog:
                 & (Track.end_offset > absolute_offset)
             )
         except Track.DoesNotExist:  # type: ignore
-            raise RuntimeError(f"No track found at absolute offset {absolute_offset}")
+            raise InvalidOffsetError(f"No track found at absolute offset {absolute_offset}")
 
     def query_tracks_intersecting_range(self, start_offset: int) -> Iterable[Track]:
         """
@@ -76,6 +78,6 @@ class Catalog:
         db_path = discover(directory)
 
         if not db_path:
-            raise FileNotFoundError(f"TarTape index not found in: {directory}")
+            raise TapeNotFoundError(f"TarTape index not found in: {directory}")
 
         return cls(db_path)
