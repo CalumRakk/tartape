@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Iterable, Optional, cast
 
+from tartape.cache import HashCacheManager
 from tartape.constants import TAPE_DB_NAME, TAPE_METADATA_DIR
 from tartape.database import DatabaseSession
 from tartape.factory import ExcludeType, TarEntryFactory
@@ -29,12 +30,16 @@ class TapeRecorder:
     ):
         self.directory = Path(directory).resolve()
         self.calculate_hashes = calculate_hashes
+        self.cache: Optional[HashCacheManager] = None
+
         if self.calculate_hashes:
             logger.info(
                 "Hash calculation is ENABLED. The engine will read the entire "
                 "dataset to compute MD5 sums during recording. "
                 "This may take a significant amount of time for massive datasets."
             )
+            self.cache = HashCacheManager(self.directory)
+
         if not self.directory.is_dir():
             raise ValueError(f"Root path '{directory}' must be a directory.")
 
@@ -133,6 +138,9 @@ class TapeRecorder:
         finally:
             if hasattr(self, "temp_session"):
                 self.temp_session.close()
+            if self.cache:
+                # Ensure cache is closed to flush any pending hashes
+                self.cache.close()
             self._temp_dir.cleanup()
 
     def _run_discovery(self):
@@ -189,6 +197,7 @@ class TapeRecorder:
             anonymize=self.anonymize,
             calculate_hash=self.calculate_hashes,
             precomputed_stat=precomputed_stat,
+            cache_manager=self.cache,
         )
 
         if metadata:
@@ -241,3 +250,5 @@ class TapeRecorder:
 
     def close(self):
         self.temp_session.close()
+        if self.cache:
+            self.cache.close()

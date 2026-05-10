@@ -3,12 +3,15 @@ import logging
 import os
 import stat as stat_module
 from pathlib import Path
-from typing import Callable, List, Optional, Union
+from typing import TYPE_CHECKING, Callable, List, Optional, Union
 
 from tartape.constants import TAPE_METADATA_DIR
 from tartape.exceptions import TarIntegrityError
 from tartape.models import Track
 from tartape.schemas import DiskEntryStats, EntryMetadata
+
+if TYPE_CHECKING:
+    from tartape.cache import HashCacheManager
 
 try:
     import grp
@@ -124,6 +127,7 @@ class TarEntryFactory:
         anonymize: bool = True,
         calculate_hash: bool = False,
         precomputed_stat: Optional[os.stat_result] = None,
+        cache_manager: Optional["HashCacheManager"] = None,
     ) -> Optional[EntryMetadata]:
         """
         Analyzes a path and creates a TarEntry.
@@ -153,7 +157,12 @@ class TarEntryFactory:
 
         md5_value = None
         if calculate_hash and stats.is_file:
-            md5_value = cls.calculate_md5(Path(source_path))
+            if cache_manager:
+                md5_value = cache_manager.get_hash(arcname, effective_size, int(stats.mtime))
+            if not md5_value:
+                md5_value = cls.calculate_md5(Path(source_path))
+                if cache_manager:
+                    cache_manager.save_hash(arcname, effective_size, int(stats.mtime), md5_value)
 
         final_mode = cls.normalize_mode(stats, anonymize)
 
