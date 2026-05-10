@@ -79,7 +79,7 @@ class TarEntryFactory:
         for component in components:
             resolved = component
             if len(component.encode("utf-8")) > 100:
-                if auto_truncate:
+                if auto_truncate is True:
                     resolved = truncate_component_safe(component, 100)
                 else:
                     raise PathConstraintError(f"Component too long: {component}")
