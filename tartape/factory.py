@@ -26,6 +26,124 @@ ExcludeType = Union[str, List[str], Callable[[Path], bool]]
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
+
+def validate_ustar_path(
+    arcname: str, is_dir: bool = False
+) -> tuple[bool, Optional[str]]:
+    """
+    Verifies whether a route strictly complies with the USTAR (155/100) splitting rules and the 255-byte total limit.
+    """
+    target = arcname if not is_dir or arcname.endswith("/") else arcname + "/"
+    target_bytes = target.encode("utf-8")
+
+    if len(target_bytes) > 255:
+        return (
+            False,
+            f"Total path exceeds USTAR 255 byte limit ({len(target_bytes)} > 255 bytes)",
+        )
+
+    components = arcname.strip("/").split("/")
+    max_leaf = 99 if is_dir else 100
+    for i, comp in enumerate(components):
+        limit = max_leaf if i == len(components) - 1 else 100
+        comp_len = len(comp.encode("utf-8"))
+        if comp_len > limit:
+            return False, f"Component '{comp}' exceeds {limit} bytes ({comp_len} bytes)"
+
+    if len(target_bytes) <= 100:
+        return True, None
+
+    # Check if there is at least one split at '/' that satisfies prefix <= 155 and name <= 100
+    has_valid_cut = False
+    for i, char in enumerate(target):
+        if char == "/":
+            prefix = target[:i]
+            name = target[i + 1 :]
+            if not name:
+                continue
+            if len(prefix.encode("utf-8")) <= 155 and len(name.encode("utf-8")) <= 100:
+                has_valid_cut = True
+                break
+
+    if not has_valid_cut:
+        return (
+            False,
+            "Path cannot be split into USTAR prefix (<= 155 bytes) and name (<= 100 bytes)",
+        )
+
+    return True, None
+
+
+def shorten_path_ustar(arcname: str, is_dir: bool = False) -> str:
+    """
+    Deterministically shortens a path to comply with USTAR.
+    Preserves the root and the final name, collapsing intermediate directories into a hash.
+    """
+    components = arcname.split("/")
+    max_leaf_bytes = 99 if is_dir else 100
+
+    # Ensure that no individual component exceeds 100 bytes.
+    clean_components = []
+    for i, comp in enumerate(components):
+        limit = max_leaf_bytes if i == len(components) - 1 else 100
+        if len(comp.encode("utf-8")) > limit:
+            comp = truncate_component_safe(comp, limit)
+        clean_components.append(comp)
+
+    candidate = "/".join(clean_components)
+    valid, _ = validate_ustar_path(candidate, is_dir=is_dir)
+    if valid:
+        return candidate
+
+    # If it is only one component (e.g., root)
+    if len(clean_components) == 1:
+        comp = clean_components[0]
+        if len(comp.encode("utf-8")) > max_leaf_bytes:
+            comp = truncate_component_safe(comp, max_leaf_bytes)
+        return comp
+
+    # Separate sheet and prefix
+    leaf = clean_components[-1]
+    prefix_components = clean_components[:-1]
+    full_prefix = "/".join(prefix_components)
+
+    # Maximum limit for the prefix, ensuring the total is <= 255 (or 254 if it is a folder)
+    max_total = 254 if is_dir else 255
+    max_prefix_bytes = min(155, max_total - 1 - len(leaf.encode("utf-8")))
+
+    # Deterministic hash of the original prefix path
+    prefix_hash = hashlib.md5(full_prefix.encode("utf-8")).hexdigest()[:8]
+    marker = f"~{prefix_hash}"
+
+    root = prefix_components[0]
+    # If the root alone is too long, truncate it to fit the marker
+    min_root_space = max_prefix_bytes - len(marker.encode("utf-8")) - 1
+    if len(root.encode("utf-8")) > min_root_space:
+        root = truncate_component_safe(root, max(10, min_root_space))
+
+    base_prefix = f"{root}/{marker}"
+    current_bytes = len(base_prefix.encode("utf-8"))
+
+    # Try to fit in as many final immediate folders as possible
+    tail_candidates = prefix_components[1:]
+    chosen_tail = []
+
+    for comp in reversed(tail_candidates):
+        comp_bytes = len(comp.encode("utf-8"))
+        if current_bytes + 1 + comp_bytes <= max_prefix_bytes:
+            chosen_tail.insert(0, comp)
+            current_bytes += 1 + comp_bytes
+        else:
+            break
+
+    if chosen_tail:
+        shortened_prefix = f"{base_prefix}/" + "/".join(chosen_tail)
+    else:
+        shortened_prefix = base_prefix
+
+    return f"{shortened_prefix}/{leaf}"
+
+
 def truncate_component_safe(component: str, max_bytes: int = 100) -> str:
     """
     Truncates a path component to a maximum byte length, ensuring
@@ -56,6 +174,7 @@ def truncate_component_safe(component: str, max_bytes: int = 100) -> str:
 
     return result
 
+
 class TarEntryFactory:
     """
     Exclusively responsible for inspecting the file system
@@ -68,35 +187,29 @@ class TarEntryFactory:
     """
 
     @staticmethod
-    def resolve_arcname(arcname: str, auto_truncate: bool = False) -> str:
+    def resolve_arcname(
+        arcname: str, auto_truncate: bool = False, is_dir: bool = False
+    ) -> str:
         """
-        Validates ADR-005 constraints or truncates if auto_truncate is True.
-        Returns the final valid archive path (arcname).
+        Validates USTAR restrictions. If auto_truncate is True,
+        it deterministically truncates the path.
         """
-        components = arcname.split("/")
-        final_components = []
+        valid, reason = validate_ustar_path(arcname, is_dir=is_dir)
+        if valid:
+            return arcname
 
-        for component in components:
-            resolved = component
-            if len(component.encode("utf-8")) > 100:
-                if auto_truncate is True:
-                    resolved = truncate_component_safe(component, 100)
-                else:
-                    raise PathConstraintError(f"Component too long: {component}")
+        if not auto_truncate:
+            raise PathConstraintError(reason or "Path violates USTAR constraints.")
 
-            # No component should EVER leave this method exceeding 100 bytes if we are in this engine.
-            if len(resolved.encode("utf-8")) > 100:
-                raise PathConstraintError(
-                    f"Critical failure: Component '{resolved}' still exceeds 100 bytes "
-                    "after resolution logic."
-                )
-            final_components.append(resolved)
+        resolved = shorten_path_ustar(arcname, is_dir=is_dir)
 
-        final_path = "/".join(final_components)
-        if len(final_path.encode("utf-8")) > 255:
-            raise PathConstraintError("Total path exceeds USTAR 255 byte limit.")
+        valid_final, reason_final = validate_ustar_path(resolved, is_dir=is_dir)
+        if not valid_final:
+            raise PathConstraintError(
+                f"Critical failure: Path '{resolved}' still violates constraints: {reason_final}"
+            )
 
-        return final_path
+        return resolved
 
     @staticmethod
     def validate_path_constraints(arcname: str):
@@ -132,7 +245,9 @@ class TarEntryFactory:
         return hash_md5.hexdigest()
 
     @staticmethod
-    def inspect(path: Path, precomputed_stat: Optional[os.stat_result] = None) -> DiskEntryStats:
+    def inspect(
+        path: Path, precomputed_stat: Optional[os.stat_result] = None
+    ) -> DiskEntryStats:
         """
         Performs low-level lstat on the path, or uses a precomputed stat result
         (e.g., from os.scandir) to avoid redundant syscalls.
@@ -217,11 +332,15 @@ class TarEntryFactory:
         md5_value = None
         if calculate_hash and stats.is_file:
             if cache_manager:
-                md5_value = cache_manager.get_hash(arcname, effective_size, int(stats.mtime))
+                md5_value = cache_manager.get_hash(
+                    arcname, effective_size, int(stats.mtime)
+                )
             if not md5_value:
                 md5_value = cls.calculate_md5(Path(source_path))
                 if cache_manager:
-                    cache_manager.save_hash(arcname, effective_size, int(stats.mtime), md5_value)
+                    cache_manager.save_hash(
+                        arcname, effective_size, int(stats.mtime), md5_value
+                    )
 
         final_mode = cls.normalize_mode(stats, anonymize)
 
@@ -240,6 +359,7 @@ class TarEntryFactory:
             linkname=linkname,
             md5sum=md5_value,
         )
+
     @staticmethod
     def normalize_mode(stats: DiskEntryStats, anonymize: bool) -> int:
         """
@@ -266,6 +386,7 @@ class TarEntryFactory:
 
         # We snap to a clean POSIX standard to eliminate environmental noise.
         return 0o755 if is_executable else 0o644
+
 
 def validate_integrity(
     expected: EntryMetadata | Track, tape_root_directory: Path

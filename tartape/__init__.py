@@ -1,4 +1,4 @@
-__version__ = "2.3.3"
+__version__ = "2.3.4"
 __copyright__ = "Copyright (C) 2026-present CalumRakk <https://github.com/CalumRakk>"
 
 import shutil
@@ -49,7 +49,9 @@ def create(
         if metadata_dir.exists():
             shutil.rmtree(metadata_dir)
 
-    recorder = TapeRecorder(directory, exclude, anonymize, calculate_hashes, auto_truncate)
+    recorder = TapeRecorder(
+        directory, exclude, anonymize, calculate_hashes, auto_truncate
+    )
     recorder.commit()
     return Tape(directory)
 

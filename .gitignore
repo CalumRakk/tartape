@@ -8,3 +8,6 @@ build/
 determinism_test_data.py
 determinism_test_data/
 docs/internal/
+
+# Metadatos locales de project-context-cli
+.project_context/
