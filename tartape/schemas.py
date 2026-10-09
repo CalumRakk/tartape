@@ -114,6 +114,7 @@ class ByteWindow:
         """Check if a file's byte range overlaps with this window."""
         return other_start < self.end and other_end > self.start
 
+
 @dataclass(frozen=True)
 class EntryMetadata:
     """
@@ -158,11 +159,33 @@ class EntryMetadata:
 
 
 @dataclass(frozen=True)
+class FileSlice:
+    """
+    It represents a contiguous portion of RAW DATA from a file within a volume.
+    It strictly excludes any TAR header bytes (512 bytes) and padding.
+    """
+
+    volume_index: int  # Index of the volume where this fragment resides (0, 1, 2...)
+    volume_offset: int  # Exact position (f.seek()) within the volume's .tar file
+    volume_length: int  # Exact number of bytes to read from the volume (f.read())
+    source_offset: int  # Position (dest.seek()) within the reconstructed original file
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "volume_index": self.volume_index,
+            "volume_offset": self.volume_offset,
+            "volume_length": self.volume_length,
+            "source_offset": self.source_offset,
+        }
+
+
+@dataclass(frozen=True)
 class ManifestEntry:
     info: EntryMetadata
     state: EntryState
     global_window: ByteWindow
     local_window: ByteWindow
+    slice: FileSlice | None = None  # None if it is dir, empty, or only header/padding
 
     @property
     def is_file(self) -> bool:
@@ -192,7 +215,9 @@ class ManifestEntry:
         return Path(root_dir) / self.info.rel_path
 
     @classmethod
-    def from_track(cls, track: "Track", view_window: ByteWindow) -> "ManifestEntry":
+    def from_track(
+        cls, track: "Track", view_window: ByteWindow, vol_index: int = 0
+    ) -> "ManifestEntry":
         global_window = ByteWindow(start=track.start_offset, end=track.end_offset)
         info = track.to_metadata()
 
@@ -212,17 +237,42 @@ class ManifestEntry:
         else:
             state = EntryState.BODY
 
+        # TAR Container Window (local_window for the stream sender)
         overlap_start = max(global_window.start, view_window.start)
         overlap_end = min(global_window.end, view_window.end)
 
         local_start = max(0, overlap_start - view_window.start)
         local_end = max(0, overlap_end - view_window.start)
 
+        # Pure Data Mathematics (FileSlice for surgical extraction)
+        content_size = info.size if (not info.is_dir and not info.is_symlink) else 0
+
+        file_slice: FileSlice | None = None
+
+        if content_size > 0:
+            # Absolute global limits where useful data resides
+            content_global_start = global_window.start + TAR_BLOCK_SIZE
+            content_global_end = content_global_start + content_size
+
+            # Intersection of useful data with current volume
+            slice_overlap_start = max(content_global_start, view_window.start)
+            slice_overlap_end = min(content_global_end, view_window.end)
+
+            # We only generate a slice if there are actually content bytes in this volume.
+            if slice_overlap_start < slice_overlap_end:
+                file_slice = FileSlice(
+                    volume_index=vol_index,
+                    volume_offset=slice_overlap_start - view_window.start,
+                    volume_length=slice_overlap_end - slice_overlap_start,
+                    source_offset=slice_overlap_start - content_global_start,
+                )
+
         return cls(
             info=info,
             global_window=global_window,
             local_window=ByteWindow(start=local_start, end=local_end),
             state=state,
+            slice=file_slice,
         )
 
 
@@ -233,9 +283,9 @@ class VolumeManifest:
     start_offset: int
     end_offset: int
     chunk_size: int
-    entries: List[ManifestEntry]
+    entries: list[ManifestEntry]
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "tape_fingerprint": self.tape_fingerprint,
             "volume_index": self.volume_index,

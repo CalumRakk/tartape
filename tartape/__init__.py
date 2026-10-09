@@ -1,4 +1,4 @@
-__version__ = "2.3.4"
+__version__ = "2.3.4b"
 __copyright__ = "Copyright (C) 2026-present CalumRakk <https://github.com/CalumRakk>"
 
 import shutil
@@ -9,6 +9,7 @@ from tartape.catalog import Catalog
 from tartape.constants import TAPE_DB_NAME, TAPE_METADATA_DIR
 from tartape.factory import ExcludeType
 from tartape.recorder import TapeRecorder
+from tartape.schemas import FileSlice
 
 from .tape import Tape
 
@@ -130,4 +131,12 @@ def get_tape(directory: str | Path) -> Optional[Tape]:
         return Tape(directory)
 
 
-__all__ = ["Tape", "create", "discover", "exists", "get_catalog", "get_tape"]
+__all__ = [
+    "FileSlice",
+    "Tape",
+    "create",
+    "discover",
+    "exists",
+    "get_catalog",
+    "get_tape",
+]

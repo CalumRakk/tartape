@@ -2,7 +2,7 @@ import json
 import logging
 import shutil
 from pathlib import Path
-from typing import Generator, List, Optional, Union
+from typing import Generator, Optional, Union
 
 import peewee
 
@@ -18,7 +18,7 @@ from tartape.exceptions import (
 )
 from tartape.factory import validate_integrity, validate_root_structure_integrity
 from tartape.models import Track
-from tartape.schemas import ByteWindow, ManifestEntry
+from tartape.schemas import ByteWindow, FileSlice, ManifestEntry
 from tartape.stream import FolderVolume, TapeVolume, TarStreamGenerator
 
 logger = logging.getLogger(__name__)
@@ -60,7 +60,7 @@ class Tape:
         return self._stats["created_at"]
 
     @property
-    def exclude_patterns(self) -> List[str] | str:
+    def exclude_patterns(self) -> list[str] | str:
         value = self._stats["exclude_patterns"]
         try:
             return json.loads(value)
@@ -114,7 +114,9 @@ class Tape:
         except Exception as e:
             # Wrap any other unexpected errors (OS errors, DB errors)
             if raise_exception:
-                raise TapeVerificationError(f"Unexpected error during verification: {e}") from e
+                raise TapeVerificationError(
+                    f"Unexpected error during verification: {e}"
+                ) from e
             return False
 
     def _verify_resume_point_integrity(self, catalog: Catalog, absolute_offset: int):
@@ -184,3 +186,32 @@ class Tape:
             )
 
         return FolderVolume(self.directory, manifest, vol_name)
+
+    def get_file_slices(self, arc_path: str, chunk_size: int) -> list[FileSlice]:
+        """
+        Retrieve all FileSlices required to reconstruct or surgically download
+        a specific file across logical volumes.
+
+        Args:
+            arc_path: Archive relative path of the file to inspect.
+            chunk_size: Desired volume size in bytes (must be a multiple of 512).
+
+        Returns:
+            list[FileSlice]: Ordered slices needed to assemble the target file.
+        """
+        chunker = TarChunker(chunk_size=chunk_size)
+        return chunker.get_file_slices(self.directory, arc_path)
+
+    def get_file_slices_map(self, chunk_size: int) -> dict[str, list[FileSlice]]:
+        """
+        Compute the complete map of FileSlices grouped by file across all volumes.
+
+        Args:
+            chunk_size: Desired volume size in bytes (must be a multiple of 512).
+
+        Returns:
+            dict[str, list[FileSlice]]: Mapping of {arc_path: [FileSlice, ...]}
+            for all regular files with content.
+        """
+        chunker = TarChunker(chunk_size=chunk_size)
+        return chunker.get_file_slices_map(self.directory)
