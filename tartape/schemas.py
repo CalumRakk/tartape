@@ -181,6 +181,19 @@ class FileSlice:
     volume_length: int  # Exact number of bytes to read from the volume (f.read())
     source_offset: int  # Position (dest.seek()) within the reconstructed original file
 
+    @property
+    def http_range(self) -> str:
+        """Canonical HTTP Range byte specification (RFC 9110), e.g. 'bytes=1024-2047'."""
+        if self.volume_length <= 0:
+            return ""
+        end_offset = self.volume_offset + self.volume_length - 1
+        return f"bytes={self.volume_offset}-{end_offset}"
+
+    @property
+    def range_header(self) -> dict[str, str]:
+        """Precomputed HTTP headers dictionary ready for requests, httpx, or aiohttp."""
+        return {"Range": self.http_range}
+
     def to_dict(self) -> dict[str, int]:
         return {
             "volume_index": self.volume_index,
