@@ -283,6 +283,7 @@ class VolumeManifest:
     start_offset: int
     end_offset: int
     chunk_size: int
+    total_size: int  # Total tape size in bytes including footer
     entries: list[ManifestEntry]
 
     def to_dict(self) -> dict[str, Any]:
@@ -292,5 +293,6 @@ class VolumeManifest:
             "start_offset": self.start_offset,
             "end_offset": self.end_offset,
             "chunk_size": self.chunk_size,
+            "total_size": self.total_size,
             "entries": self.entries,
         }

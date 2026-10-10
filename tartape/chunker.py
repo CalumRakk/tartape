@@ -53,7 +53,11 @@ class TarChunker:
 
     @classmethod
     def get_volume_manifest_for_range(
-        cls, fingerprint: str, vol_index: int, volume_window: ByteWindow
+        cls,
+        fingerprint: str,
+        vol_index: int,
+        volume_window: ByteWindow,
+        total_size: int,
     ) -> VolumeManifest:
         """
         Calculates the manifest for a specific byte range window.
@@ -82,6 +86,7 @@ class TarChunker:
             start_offset=volume_window.start,
             end_offset=volume_window.end,
             chunk_size=volume_window.end - volume_window.start,
+            total_size=total_size,
             entries=entries,
         )
 
@@ -136,7 +141,9 @@ class TarChunker:
         for i, (vol_start, vol_end) in enumerate(segments):
             with Catalog.from_directory(directory):
                 window = ByteWindow(start=vol_start, end=vol_end)
-                manifest = self.get_volume_manifest_for_range(fingerprint, i, window)
+                manifest = self.get_volume_manifest_for_range(
+                    fingerprint, i, window, total_size=total_size
+                )
 
             filename = self._resolve_volume_name(
                 fingerprint=fingerprint,
@@ -172,7 +179,9 @@ class TarChunker:
             segments = list(calculate_segments(total_size, self.chunk_size))
             for i, (vol_start, vol_end) in enumerate(segments):
                 window = ByteWindow(start=vol_start, end=vol_end)
-                manifest = self.get_volume_manifest_for_range(fingerprint, i, window)
+                manifest = self.get_volume_manifest_for_range(
+                    fingerprint, i, window, total_size=total_size
+                )
                 for entry in manifest.entries:
                     if entry.slice is not None:
                         slices_map.setdefault(entry.info.arc_path, []).append(

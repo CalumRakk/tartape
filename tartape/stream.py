@@ -39,9 +39,15 @@ class TapeVolume(io.BufferedIOBase):
 
 
 class TarStreamGenerator:
-    def __init__(self, entries: Iterable[ManifestEntry], directory: str | Path):
+    def __init__(
+        self,
+        entries: Iterable[ManifestEntry],
+        directory: str | Path,
+        total_tape_size: Optional[int] = None,
+    ):
         self.directory = Path(directory)
         self.entries = entries
+        self.total_tape_size = total_tape_size
 
     def stream(
         self, start_offset: int = 0, chunk_size: Optional[int] = None
@@ -55,7 +61,6 @@ class TarStreamGenerator:
         last_offset = 0
 
         for entry in self.entries:
-
             # If we already passed this entire file, we skip it
             if start_offset >= entry.global_window.end:
                 last_offset = entry.global_window.end
@@ -75,7 +80,14 @@ class TarStreamGenerator:
             yield self._create_event_end(entry, md5_hash)
             last_offset = entry.global_window.end
 
-        yield from self._emit_stream_gen_footer(start_offset, last_offset)
+        # Calculate footer start based on immutable total_tape_size if available,
+        # otherwise fallback to last_offset for standalone streams.
+        if self.total_tape_size is not None:
+            footer_start = self.total_tape_size - TAR_FOOTER_SIZE
+        else:
+            footer_start = last_offset
+
+        yield from self._emit_stream_gen_footer(start_offset, footer_start)
         yield TarTapeCompletedEvent(type="tape_completed")
         logger.info("TAR stream completed successfully.")
 
@@ -251,8 +263,6 @@ class FolderVolume(TapeVolume):
             self._integrity_broken = False
             logger.debug(f"Linear hash initialized for volume {self.name}")
 
-        # If the seek target doesn't match where our hashing left off,
-        # we mark the linear hash as compromised.
         elif offset_in_volume != self._hash_cursor:
             self._integrity_broken = True
             logger.warning(
@@ -262,14 +272,22 @@ class FolderVolume(TapeVolume):
             )
 
         global_target = self.start_offset + offset_in_volume
-        engine = TarStreamGenerator(self.manifest.entries, self.directory)
+        engine = TarStreamGenerator(
+            self.manifest.entries,
+            self.directory,
+            total_tape_size=self.manifest.total_size,
+        )
         self._stream_gen = engine.stream(start_offset=global_target)
 
     def _calculate_manually(self) -> str:
         logger.info(f"Performing manual MD5 pass for volume: {self.name}")
         hasher = hashlib.md5()
 
-        engine = TarStreamGenerator(self.manifest.entries, self.directory)
+        engine = TarStreamGenerator(
+            self.manifest.entries,
+            self.directory,
+            total_tape_size=self.manifest.total_size,
+        )
         stream = engine.stream(start_offset=self.start_offset)
 
         bytes_hashed = 0
@@ -377,7 +395,9 @@ class FolderVolume(TapeVolume):
             raise ValueError("Invalid whence")
 
         if target < 0 or target > self.size:
-            raise InvalidOffsetError(f"Seek position {target} is out of bounds (0-{self.size})")
+            raise InvalidOffsetError(
+                f"Seek position {target} is out of bounds (0-{self.size})"
+            )
 
         if target == self._position:
             return self._position

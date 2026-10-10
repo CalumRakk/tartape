@@ -165,7 +165,9 @@ class Tape:
                 for track in tracks:
                     yield ManifestEntry.from_track(track, tape_window)
 
-            engine = TarStreamGenerator(track_loader(), self.directory)
+            engine = TarStreamGenerator(
+                track_loader(), self.directory, total_tape_size=self.total_size
+            )
             yield from engine.stream(start_offset=start_offset, chunk_size=chunk_size)
 
     def get_volume(
@@ -182,7 +184,7 @@ class Tape:
 
         with Catalog.from_directory(self.directory):
             manifest = TarChunker.get_volume_manifest_for_range(
-                self.fingerprint, vol_index, volume_window
+                self.fingerprint, vol_index, volume_window, total_size=self.total_size
             )
 
         return FolderVolume(self.directory, manifest, vol_name)

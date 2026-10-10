@@ -1,4 +1,4 @@
-__version__ = "2.3.4b"
+__version__ = "2.3.5"
 __copyright__ = "Copyright (C) 2026-present CalumRakk <https://github.com/CalumRakk>"
 
 import shutil

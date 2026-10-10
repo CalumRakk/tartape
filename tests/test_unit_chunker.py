@@ -6,7 +6,6 @@ from tests.base import TarTapeTestCase
 
 
 class TestChunkerLogic(TarTapeTestCase):
-
     def test_fragmentation_states(self):
         """Verifica que el Chunker identifique correctamente HEAD, BODY, TAIL y COMPLETE."""
 
@@ -33,14 +32,17 @@ class TestChunkerLogic(TarTapeTestCase):
             )
             stats = catalog.get_stats()
             fingerprint = stats["fingerprint"]
+            total_size = stats["total_size"]
 
-            # Divimos la "cinta" en 4 partes
+            # Dividimos la "cinta" en 4 partes
             segments = list(calculate_segments(stats["total_size"], 50))
 
             # Vol 0: Global Window [0, 50]
             start, end = segments[0]
             window = ByteWindow(start=start, end=end)
-            vol0 = TarChunker.get_volume_manifest_for_range(fingerprint, 0, window)
+            vol0 = TarChunker.get_volume_manifest_for_range(
+                fingerprint, 0, window, total_size=total_size
+            )
 
             self.assertEqual(vol0.entries[0].state, EntryState.HEAD)
             self.assertEqual(vol0.entries[0].local_window.start, 10)
@@ -51,7 +53,9 @@ class TestChunkerLogic(TarTapeTestCase):
             # El archivo cubre todo el volumen.
             start, end = segments[1]
             window = ByteWindow(start=start, end=end)
-            vol1 = TarChunker.get_volume_manifest_for_range(fingerprint, 1, window)
+            vol1 = TarChunker.get_volume_manifest_for_range(
+                fingerprint, 1, window, total_size=total_size
+            )
 
             self.assertEqual(vol1.entries[0].state, EntryState.BODY)
             self.assertEqual(vol1.entries[0].local_window.start, 0)
@@ -61,7 +65,9 @@ class TestChunkerLogic(TarTapeTestCase):
             # El archivo termina en el valor global 110. En relación con Vol Start (100), el final es 10.
             start, end = segments[2]
             window = ByteWindow(start=start, end=end)
-            vol2 = TarChunker.get_volume_manifest_for_range(fingerprint, 2, window)
+            vol2 = TarChunker.get_volume_manifest_for_range(
+                fingerprint, 2, window, total_size=total_size
+            )
 
             self.assertEqual(vol2.entries[0].state, EntryState.TAIL)
             self.assertEqual(vol2.entries[0].local_window.start, 0)
@@ -88,6 +94,7 @@ class TestChunkerLogic(TarTapeTestCase):
             )
             stats = catalog.get_stats()
             f = stats["fingerprint"]
+            total_size = stats["total_size"]
 
             # Nuestra cinta es solo un volumen de 100 bytes
             segments = list(calculate_segments(stats["total_size"], 100))
@@ -96,7 +103,9 @@ class TestChunkerLogic(TarTapeTestCase):
             start, end = segments[0]
             window = ByteWindow(start=start, end=end)
 
-            vol = TarChunker.get_volume_manifest_for_range(f, 0, window)
+            vol = TarChunker.get_volume_manifest_for_range(
+                f, 0, window, total_size=total_size
+            )
             self.assertEqual(vol.entries[0].state, EntryState.COMPLETE)
             self.assertEqual(vol.entries[0].local_window.start, 10)
             self.assertEqual(vol.entries[0].local_window.end, 30)
