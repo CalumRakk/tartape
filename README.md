@@ -16,6 +16,42 @@ TarTape solves these issues by turning any directory into a predictable, resumab
 
 ---
 
+## The Mental Model: Tape vs. Volumes
+
+To get the most out of TarTape, it helps to understand two simple concepts:
+
+* **Tape:** The complete virtual archive for your directory. It behaves as one continuous stream of bytes from start to finish.
+* **Volume:** A virtual slice or window of that exact tape (for example, divided into 2 GB chunks). It does not create files on your disk or alter your data. Each volume behaves like an independent open file with its own name and checksum, ready for cloud multipart uploads.
+
+```text
+  Your Directory on Disk (e.g., 5 GB)
+  └── folder/
+      ├── data.csv (3 GB)
+      └── images/ ...
+            │
+            ▼ tartape.record()
+  ┌─────────────────────────────────────────────────────────────────┐
+  │  TAPE: The Complete Virtual Archive (5 GB continuous stream)    │
+  │  [TAR Header] [ data.csv bytes... ] [TAR Header] [ images... ]  │
+  └─────────────────────────────────────────────────────────────────┘
+                     │
+                     │ tape.iter_volumes(size="2GB")
+                     ▼
+  ┌───────────────────┐  ┌───────────────────┐  ┌───────────────────┐
+  │     VOLUME 0      │  │     VOLUME 1      │  │     VOLUME 2      │
+  │   (Bytes 0 - 2GB) │  │  (Bytes 2GB - 4GB)│  │  (Bytes 4GB - 5GB)│
+  │  backup.tar.001   │  │  backup.tar.002   │  │  backup.tar.003   │
+  │  MD5: 9a3f...     │  │  MD5: c4b1...     │  │  MD5: 71ea...     │
+  └───────────────────┘  └───────────────────┘  └───────────────────┘
+            │                      │                      │
+            └──────────────┬──────────────────────────────┘
+                           ▼
+     Uploaded to S3 / Cloud Storage as Multipart Parts
+     (concatenating these parts gives you the original, valid TAR)
+```
+
+---
+
 ## What You Can Do with TarTape
 
 * **Stream directly to the cloud:** Generate TAR bytes in memory as they are sent. Never fill your local disk with temporary archive files.
@@ -255,6 +291,24 @@ with tartape.open("./my_dataset") as tape:
 
 ---
 
+## Handling Deeply Nested Directories (`auto_truncate`)
+
+The standard TAR specification (USTAR) restricts individual folder and file names to 100 bytes. In deeply nested projects (like complex web projects or cache trees), some paths may exceed this limit.
+
+By default, TarTape aborts with a clear report if a path violates this standard. If you want TarTape to handle this automatically, enable `auto_truncate=True`:
+
+```python
+tape = tartape.record("./my_dataset", auto_truncate=True)
+```
+
+**How it works:**
+* Long path components are deterministically shortened using a hash suffix (e.g., `very_long_folder_name_a1b2c3d4`).
+* The resulting archive remains 100% compliant with standard `tar` tools.
+
+> **Good to know:** When extracting using standard system tools (`tar -xf`), those specific folders will use the shortened name. However, **the full original path is always preserved in your `.tartape` index file**, ensuring you never lose your original directory metadata.
+
+---
+
 ## Important Things to Know
 
 * **Determinism Scope:** Running `record()` on the same folder produces the exact same byte sequence and hash when executed on machines running the **same operating system** (e.g., Linux to Linux).
@@ -275,9 +329,3 @@ with tartape.open("./my_dataset") as tape:
 | `tape.get_volume(index, size="1GB")` | Retrieves a specific volume directly without iterating through previous parts. |
 | `tape.verify(deep=False)` | Checks if local files on disk match the recorded index. |
 | `catalog.locate(arc_path)` | Returns coordinates and precalculated `range_header` for each file fragment. |
-
----
-
-## License
-
-MIT License. See [LICENSE](LICENSE) for details.
