@@ -1,5 +1,9 @@
+"""TarTape: Deterministic, streaming TAR archive engine."""
+
 __version__ = "3.0.0"
 __copyright__ = "Copyright (C) 2026-present CalumRakk <https://github.com/CalumRakk>"
+__license__ = "MIT"
+
 
 from pathlib import Path
 from typing import Optional
@@ -26,6 +30,7 @@ from tartape.recorder import TapeRecorder
 from tartape.schemas import FileGPS, FileSlice, ManifestEntry, TarEvent, TarObserver
 from tartape.stream import Volume
 from tartape.tape import Tape
+from tartape.units import format_size, parse_size
 
 
 def record(
@@ -36,11 +41,11 @@ def record(
     calculate_hashes: bool = False,
     overwrite: bool = False,
     auto_truncate: bool = False,
-) -> Path:
+) -> Tape:
     """Record an immutable T0 catalog snapshot of a directory.
 
-    Builds an optimized, standalone .tartape sidecar catalog without modifying
-    the target directory. Supports read-only filesystems when catalog_path is provided.
+    Builds an optimized standalone .tartape sidecar catalog without modifying
+    the target directory. Returns an active Tape instance ready for streaming.
 
     Args:
         directory: The root directory to scan and record.
@@ -53,7 +58,7 @@ def record(
         auto_truncate: If True, automatically shortens components exceeding 100 bytes.
 
     Returns:
-        Path: The absolute path to the generated .tartape catalog file.
+        Tape: An initialized Tape instance pointing to the recorded catalog.
     """
     recorder = TapeRecorder(
         directory=directory,
@@ -65,7 +70,7 @@ def record(
         auto_truncate=auto_truncate,
     )
     recorder.commit()
-    return recorder.catalog_path
+    return Tape(directory, catalog_path=recorder.catalog_path)
 
 
 def open(
@@ -97,24 +102,22 @@ def open(
     return Tape(dir_path)
 
 
-def create(
-    directory: str | Path,
-    exclude: Optional[ExcludeType] = None,
-    anonymize: bool = True,
-    calculate_hashes: bool = False,
-    overwrite: bool = False,
-    auto_truncate: bool = False,
-) -> Tape:
-    """Legacy alias for backward compatibility. Records a sidecar and returns Tape."""
-    _ = record(
-        directory=directory,
-        exclude=exclude,
-        anonymize=anonymize,
-        calculate_hashes=calculate_hashes,
-        overwrite=overwrite,
-        auto_truncate=auto_truncate,
-    )
-    return Tape(directory)
+def open_catalog(catalog_path: str | Path) -> Catalog:
+    """Open a standalone .tartape catalog file in offline/zero-disk mode.
+
+    Does not require the original source directory to exist on disk.
+    """
+    path = Path(catalog_path)
+    if not path.exists():
+        raise TapeNotFoundError(f"Catalog file not found at: {catalog_path}")
+    return Catalog(path)
+
+
+def exists(directory: str | Path, catalog_path: Optional[str | Path] = None) -> bool:
+    """Check if a directory has a recorded TarTape catalog."""
+    if catalog_path is not None:
+        return Path(catalog_path).exists()
+    return discover(directory) is not None
 
 
 def discover(directory: str | Path) -> Optional[Path]:
@@ -136,38 +139,7 @@ def discover(directory: str | Path) -> Optional[Path]:
     return None
 
 
-def exists(directory: str | Path, catalog_path: Optional[str | Path] = None) -> bool:
-    """Check if a directory has a recorded TarTape catalog."""
-    if catalog_path is not None:
-        return Path(catalog_path).exists()
-    return discover(directory) is not None
-
-
-def get_catalog(directory: str | Path) -> Catalog:
-    """Open and retrieve the catalog for a recorded tape."""
-    db_path = discover(directory)
-    if db_path is None:
-        raise TapeNotFoundError(f"No TarTape catalog found for: {directory}")
-    return Catalog(db_path)
-
-
-def get_tape(directory: str | Path) -> Optional[Tape]:
-    """Initialize a Tape object from an existing directory catalog."""
-    if exists(directory):
-        return Tape(directory)
-    return None
-
-
-def open_catalog(catalog_path: str | Path) -> Catalog:
-    """Open a standalone .tartape catalog file in offline/zero-disk mode.
-
-    Does not require the original source directory to exist on disk.
-    """
-    path = Path(catalog_path)
-    if not path.exists():
-        raise TapeNotFoundError(f"Catalog file not found at: {catalog_path}")
-    return Catalog(path)
-
+create = record
 
 __all__ = [
     "AmbiguousLayoutError",
@@ -195,9 +167,9 @@ __all__ = [
     "create",
     "discover",
     "exists",
-    "get_catalog",
-    "get_tape",
+    "format_size",
     "open",
     "open_catalog",
+    "parse_size",
     "record",
 ]

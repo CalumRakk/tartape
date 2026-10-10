@@ -7,6 +7,7 @@ from tartape.constants import TAR_BLOCK_SIZE
 from tartape.models import Track
 from tartape.schemas import ByteWindow, FileSlice, ManifestEntry, VolumeManifest
 from tartape.stream import FolderVolume, TapeVolume
+from tartape.units import parse_size
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +50,7 @@ class TarChunker:
                 f"TAR block size ({TAR_BLOCK_SIZE} bytes)."
             )
 
-        self.chunk_size = chunk_size
+        self.chunk_size = parse_size(chunk_size)
 
     @classmethod
     def get_volume_manifest_for_range(

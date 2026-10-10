@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import shutil
 from collections.abc import Callable
 from pathlib import Path
@@ -29,7 +30,7 @@ from tartape.stream import (
 logger = logging.getLogger(__name__)
 
 
-class Tape:
+class Tape(os.PathLike):
     """The Master Class representing a complete data tape.
 
     Orchestrates the Catalog, the Player, and the Chunker.
@@ -76,6 +77,18 @@ class Tape:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
+
+    def __fspath__(self) -> str:
+        """Return the file system path representation of the sidecar catalog file."""
+        if self.catalog_path:
+            return str(self.catalog_path)
+        return str(self._get_catalog().path)
+
+    def __eq__(self, other: object) -> bool:
+        """Allow comparing Tape directly against Path or string catalog paths."""
+        if isinstance(other, (str, Path, os.PathLike)):
+            return Path(self.__fspath__()) == Path(other)
+        return super().__eq__(other)
 
     @property
     def count_files(self) -> int:
@@ -137,6 +150,7 @@ class Tape:
                     total = Track.select().count()
                     if total > 0:
                         samples = Track.select().order_by(peewee.fn.Random()).limit(15)
+                        # TODO: It should be a percentage of the files, rather than a hard-coded value.
                         for track in samples:
                             validate_integrity(track, self.directory)
                 return True
@@ -165,7 +179,7 @@ class Tape:
 
     def iter_volumes(
         self,
-        size: int,
+        size: int | str,
         tag: Optional[str] = None,
         is_default: bool = True,
         naming_template: Optional[str] = None,
@@ -251,7 +265,7 @@ class Tape:
     def get_volume(
         self,
         index: int | str = 0,
-        size: int | None = None,
+        size: int | str | None = None,
         tag: Optional[str] = None,
         vol_start: int | None = None,
         vol_end: int | None = None,

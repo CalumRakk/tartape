@@ -14,6 +14,7 @@ from tartape.exceptions import (
 )
 from tartape.models import LayoutRecord, TapeMetadata, Track, VolumeRecord
 from tartape.schemas import FileGPS, FileSlice
+from tartape.units import format_size, parse_size
 
 from .database import DatabaseSession
 
@@ -235,38 +236,55 @@ class Catalog:
     def get_layout(self, tag_or_size: str | int) -> Layout:
         """Retrieve a specific layout by its tag name or volume size."""
         with self.db_session:
-            try:
-                if isinstance(tag_or_size, int):
+            # Look up by integer byte size
+            if isinstance(tag_or_size, int):
+                try:
                     record = LayoutRecord.get(LayoutRecord.volume_size == tag_or_size)
-                else:
-                    record = LayoutRecord.get(LayoutRecord.tag == str(tag_or_size))
+                    return Layout(record, self.db_session)
+                except LayoutRecord.DoesNotExist:  # type: ignore
+                    raise LayoutNotFoundError(
+                        f"Layout with size {tag_or_size} bytes not found in catalog."
+                    )
+
+            # Direct match on tag (e.g., '1GB', 'custom_part')
+            try:
+                record = LayoutRecord.get(LayoutRecord.tag == str(tag_or_size))
                 return Layout(record, self.db_session)
             except LayoutRecord.DoesNotExist:  # type: ignore
-                raise LayoutNotFoundError(
-                    f"Layout '{tag_or_size}' not found in catalog."
-                )
+                pass
+
+            # Try parsing tag_or_size as a human size string (e.g., '1gb' -> 1073741824)
+            try:
+                parsed_bytes = parse_size(tag_or_size)
+                record = LayoutRecord.get(LayoutRecord.volume_size == parsed_bytes)
+                return Layout(record, self.db_session)
+            except (ValueError, TypeError, LayoutRecord.DoesNotExist):  # type: ignore
+                pass
+
+            # Backwards compatibility with legacy 'vol_{parsed_bytes}' or 'vol_{tag_or_size}'
+            try:
+                record = LayoutRecord.get(LayoutRecord.tag == f"vol_{tag_or_size}")
+                return Layout(record, self.db_session)
+            except LayoutRecord.DoesNotExist:  # type: ignore
+                pass
+
+            raise LayoutNotFoundError(f"Layout '{tag_or_size}' not found in catalog.")
 
     def register_layout(
         self,
-        volume_size: int,
+        volume_size: int | str,
         tag: Optional[str] = None,
         is_default: bool = False,
         naming_template: Optional[str] = None,
     ) -> Layout:
         """Register a new partitioning layout and compute its volume manifest."""
-        if volume_size <= 0:
-            raise ValueError("Volume size must be greater than 0.")
-        if volume_size % TAR_BLOCK_SIZE != 0:
-            raise ValueError(
-                f"Volume size ({volume_size}) must be a multiple of TAR block size ({TAR_BLOCK_SIZE} bytes)."
-            )
-
-        layout_tag = tag or f"vol_{volume_size}"
+        parsed_volume_size = parse_size(volume_size)
+        layout_tag = tag or format_size(parsed_volume_size)
         total_size = self.total_size
 
         from tartape.chunker import calculate_segments
 
-        segments = list(calculate_segments(total_size, volume_size))
+        segments = list(calculate_segments(total_size, parsed_volume_size))
         total_vols = len(segments)
 
         template = naming_template or "{name}_{fingerprint:.8}.tar.{pindex}"
@@ -281,14 +299,14 @@ class Catalog:
             layout_rec, created = LayoutRecord.get_or_create(
                 tag=layout_tag,
                 defaults={
-                    "volume_size": volume_size,
+                    "volume_size": parsed_volume_size,
                     "total_volumes": total_vols,
                     "created_at": int(time.time()),
                     "is_default": is_default,
                 },
             )
             if not created:
-                layout_rec.volume_size = volume_size
+                layout_rec.volume_size = parsed_volume_size
                 layout_rec.total_volumes = total_vols
                 layout_rec.is_default = is_default
                 layout_rec.save()
