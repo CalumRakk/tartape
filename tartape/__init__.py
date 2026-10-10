@@ -1,17 +1,100 @@
-__version__ = "2.3.5"
+__version__ = "3.0.0"
 __copyright__ = "Copyright (C) 2026-present CalumRakk <https://github.com/CalumRakk>"
 
-import shutil
 from pathlib import Path
 from typing import Optional
 
-from tartape.catalog import Catalog
-from tartape.constants import TAPE_DB_NAME, TAPE_METADATA_DIR
+from tartape.catalog import Catalog, Layout
+from tartape.constants import TAPE_DB_NAME, TAPE_EXTENSION, TAPE_METADATA_DIR
+from tartape.exceptions import (
+    AmbiguousLayoutError,
+    InvalidOffsetError,
+    LayoutNotFoundError,
+    PathConstraintError,
+    PathConstraintReportError,
+    TapeCorruptedError,
+    TapeNotFoundError,
+    TapeVerificationError,
+    TarIntegrityError,
+    TarTapeError,
+    VolumeChecksumMismatchError,
+    VolumeNotFoundError,
+    VolumeStateError,
+)
 from tartape.factory import ExcludeType
 from tartape.recorder import TapeRecorder
-from tartape.schemas import FileSlice
+from tartape.schemas import FileGPS, FileSlice, ManifestEntry, TarEvent, TarObserver
+from tartape.stream import Volume
+from tartape.tape import Tape
 
-from .tape import Tape
+
+def record(
+    directory: str | Path,
+    catalog_path: Optional[str | Path] = None,
+    exclude: Optional[ExcludeType] = None,
+    anonymize: bool = True,
+    calculate_hashes: bool = False,
+    overwrite: bool = False,
+    auto_truncate: bool = False,
+) -> Path:
+    """Record an immutable T0 catalog snapshot of a directory.
+
+    Builds an optimized, standalone .tartape sidecar catalog without modifying
+    the target directory. Supports read-only filesystems when catalog_path is provided.
+
+    Args:
+        directory: The root directory to scan and record.
+        catalog_path: Optional destination path for the sidecar file. Defaults to
+            `<directory.parent>/<directory.name>.tartape`.
+        exclude: Patterns or callable to skip specific files or directories.
+        anonymize: If True, scrubs UID/GID and sets ownership to 'root'.
+        calculate_hashes: If True, computes MD5 hashes for all files during scan.
+        overwrite: If True, replaces existing catalog file at destination.
+        auto_truncate: If True, automatically shortens components exceeding 100 bytes.
+
+    Returns:
+        Path: The absolute path to the generated .tartape catalog file.
+    """
+    recorder = TapeRecorder(
+        directory=directory,
+        catalog_path=catalog_path,
+        exclude=exclude,
+        anonymize=anonymize,
+        calculate_hashes=calculate_hashes,
+        overwrite=overwrite,
+        auto_truncate=auto_truncate,
+    )
+    recorder.commit()
+    return recorder.catalog_path
+
+
+def open(
+    directory: str | Path,
+    catalog_path: Optional[str | Path] = None,
+) -> Tape:
+    """Open an existing recorded tape for streaming and volume access.
+
+    Args:
+        directory: The root directory of the recorded tape.
+        catalog_path: Optional path to an external .tartape catalog sidecar file.
+
+    Returns:
+        Tape: A Tape instance ready for streaming, volume slicing, or inspection.
+
+    Raises:
+        TapeNotFoundError: If no TarTape catalog is found.
+    """
+    dir_path = Path(directory)
+    if catalog_path is not None:
+        cat_file = Path(catalog_path)
+        if not cat_file.exists():
+            raise TapeNotFoundError(f"Catalog file not found at: {catalog_path}")
+        return Tape(dir_path, catalog_path=cat_file)
+
+    if not exists(dir_path):
+        raise TapeNotFoundError(f"No TarTape catalog found for: {directory}")
+
+    return Tape(dir_path)
 
 
 def create(
@@ -22,121 +105,99 @@ def create(
     overwrite: bool = False,
     auto_truncate: bool = False,
 ) -> Tape:
-    """Record a new tape.
-
-    Args:
-        directory: The root directory to record. Must be a directory.
-        exclude: Patterns or a callable to skip specific files or directories.
-        anonymize: If True, scrubs UID/GID and sets ownership to 'root'.
-        calculate_hashes: If True, computes MD5 fingerprints for every file during discovery.
-        overwrite: If True, deletes any existing .tartape directory before starting.
-        auto_truncate: If True, automatically shortens path components exceeding 100 bytes
-            using a deterministic hash to prevent ADR-005 violations.
-
-    Returns:
-        Tape: A ready-to-play object representing the frozen state of the directory.
-
-    Raises:
-        ValueError: If the provided directory is invalid.
-        FileExistsError: If a tape already exists and overwrite is False.
-        PathConstraintReportError: If paths violate USTAR limits and auto_truncate is False.
-    """
-
-    if not Path(directory).is_dir():
-        raise ValueError(f"Root directory '{directory}' must be a directory.")
-
-    if overwrite:
-        metadata_dir = Path(directory) / TAPE_METADATA_DIR
-        if metadata_dir.exists():
-            shutil.rmtree(metadata_dir)
-
-    recorder = TapeRecorder(
-        directory, exclude, anonymize, calculate_hashes, auto_truncate
+    """Legacy alias for backward compatibility. Records a sidecar and returns Tape."""
+    _ = record(
+        directory=directory,
+        exclude=exclude,
+        anonymize=anonymize,
+        calculate_hashes=calculate_hashes,
+        overwrite=overwrite,
+        auto_truncate=auto_truncate,
     )
-    recorder.commit()
     return Tape(directory)
 
 
 def discover(directory: str | Path) -> Optional[Path]:
-    """
-    Locate the absolute path to the TarTape index database if it exists.
-
-    Args:
-        directory: The root directory where the tape was recorded.
-
-    Returns:
-        Optional[Path]: The path to 'index.db' if found, otherwise None.
-
-    Raises:
-        NotADirectoryError: If the input path is not a valid directory.
-    """
+    """Locate the catalog path for a given directory (checking sidecar first, then legacy)."""
     target_dir = Path(directory)
     if not target_dir.is_dir():
-        raise NotADirectoryError(f"{directory} is not a valid directory.")
+        return None
 
-    candidate = target_dir / TAPE_METADATA_DIR / TAPE_DB_NAME
-    if candidate.exists() and candidate.is_file():
-        return candidate
+    # 1. Primary: Sidecar file alongside the folder
+    sidecar = target_dir.parent / f"{target_dir.name}{TAPE_EXTENSION}"
+    if sidecar.exists() and sidecar.is_file():
+        return sidecar
+
+    # 2. Fallback: Legacy .tartape/index.db inside the folder
+    legacy = target_dir / TAPE_METADATA_DIR / TAPE_DB_NAME
+    if legacy.exists() and legacy.is_file():
+        return legacy
 
     return None
 
 
-def exists(directory: str | Path) -> bool:
-    """
-    Check if a directory contains a valid and recorded TarTape index.
-
-    Args:
-        directory: The directory to inspect.
-
-    Returns:
-        bool: True if the '.tartape/index.db' exists, False otherwise.
-    """
-    if discover(directory):
-        return True
-    return False
+def exists(directory: str | Path, catalog_path: Optional[str | Path] = None) -> bool:
+    """Check if a directory has a recorded TarTape catalog."""
+    if catalog_path is not None:
+        return Path(catalog_path).exists()
+    return discover(directory) is not None
 
 
 def get_catalog(directory: str | Path) -> Catalog:
-    """
-    Open and retrieve the database catalog for a recorded tape.
-
-    Args:
-        directory: The root directory of the recorded tape.
-
-    Returns:
-        Catalog: An object to perform low-level queries on the tape metadata.
-
-    Raises:
-        FileNotFoundError: If the tape index does not exist in the given directory.
-    """
-    if not exists(directory):
-        raise FileNotFoundError(f"The tape does not exist in: {directory}")
-
+    """Open and retrieve the catalog for a recorded tape."""
     db_path = discover(directory)
-    assert db_path is not None, "Could not find database file"
+    if db_path is None:
+        raise TapeNotFoundError(f"No TarTape catalog found for: {directory}")
     return Catalog(db_path)
 
 
 def get_tape(directory: str | Path) -> Optional[Tape]:
-    """
-    Initialize a Tape object from an existing directory index.
-
-    Args:
-        directory: The root directory where the tape was recorded.
-
-    Returns:
-        Optional[Tape]: The Tape instance for streaming, or None if not recorded.
-    """
+    """Initialize a Tape object from an existing directory catalog."""
     if exists(directory):
         return Tape(directory)
+    return None
+
+
+def open_catalog(catalog_path: str | Path) -> Catalog:
+    """Open a standalone .tartape catalog file in offline/zero-disk mode.
+
+    Does not require the original source directory to exist on disk.
+    """
+    path = Path(catalog_path)
+    if not path.exists():
+        raise TapeNotFoundError(f"Catalog file not found at: {catalog_path}")
+    return Catalog(path)
 
 
 __all__ = [
+    "AmbiguousLayoutError",
+    "Catalog",
+    "FileGPS",
     "FileSlice",
+    "InvalidOffsetError",
+    "Layout",
+    "LayoutNotFoundError",
+    "ManifestEntry",
+    "PathConstraintError",
+    "PathConstraintReportError",
     "Tape",
+    "TapeCorruptedError",
+    "TapeNotFoundError",
+    "TapeVerificationError",
+    "TarEvent",
+    "TarIntegrityError",
+    "TarObserver",
+    "TarTapeError",
+    "Volume",
+    "VolumeChecksumMismatchError",
+    "VolumeNotFoundError",
+    "VolumeStateError",
     "create",
     "discover",
     "exists",
     "get_catalog",
     "get_tape",
+    "open",
+    "open_catalog",
+    "record",
 ]

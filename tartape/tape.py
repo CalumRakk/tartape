@@ -1,15 +1,15 @@
 import json
 import logging
 import shutil
+from collections.abc import Callable
 from pathlib import Path
-from typing import Generator, Optional, Union
+from typing import Generator, Optional
 
 import peewee
 
-import tartape
 from tartape.catalog import Catalog
 from tartape.chunker import TarChunker
-from tartape.constants import TAPE_METADATA_DIR
+from tartape.constants import TAPE_EXTENSION, TAPE_METADATA_DIR
 from tartape.exceptions import (
     InvalidOffsetError,
     TapeNotFoundError,
@@ -18,41 +18,78 @@ from tartape.exceptions import (
 )
 from tartape.factory import validate_integrity, validate_root_structure_integrity
 from tartape.models import Track
-from tartape.schemas import ByteWindow, FileSlice, ManifestEntry
-from tartape.stream import FolderVolume, TapeVolume, TarStreamGenerator
+from tartape.schemas import ByteWindow, FileSlice, ManifestEntry, TarEvent, TarObserver
+from tartape.stream import (
+    TapeStreamReader,
+    TapeVolume,
+    TarStreamGenerator,
+    Volume,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class Tape:
-    """
-    The Master Class. It represents a complete data tape.
-    It is the engine that orchestrates the Catalog, the Player, and the Chunker.
+    """The Master Class representing a complete data tape.
+
+    Orchestrates the Catalog, the Player, and the Chunker.
     """
 
-    def __init__(self, directory: Union[str, Path]):
+    def __init__(
+        self,
+        directory: str | Path,
+        catalog_path: Optional[str | Path] = None,
+    ):
         self.directory = Path(directory).resolve()
+        self.catalog_path = Path(catalog_path).resolve() if catalog_path else None
         self._stats = {}
+        self._track_count = 0
+        self._catalog_instance: Optional[Catalog] = None
         self._refresh_metadata()
 
     def _refresh_metadata(self):
-        with Catalog.from_directory(self.directory) as cat:
+        cat = self._get_catalog()
+        with cat:
             self._stats = cat.get_stats()
-            self._track_count = cat.get_track_count()
+            self._track_count = cat.file_count
+
+    def _get_catalog(self) -> Catalog:
+        if self._catalog_instance is None:
+            if self.catalog_path is not None:
+                if not self.catalog_path.exists():
+                    raise TapeNotFoundError(
+                        f"Catalog file not found at: {self.catalog_path}"
+                    )
+                self._catalog_instance = Catalog(self.catalog_path)
+            else:
+                self._catalog_instance = Catalog.from_directory(self.directory)
+        return self._catalog_instance
+
+    def close(self):
+        """Close any cached catalog database connections."""
+        if self._catalog_instance is not None:
+            self._catalog_instance.close()
+            self._catalog_instance = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
 
     @property
     def count_files(self) -> int:
-        """Returns the total number of files in the tape."""
-        return self._stats["total_size"]
+        """Total number of files in the tape."""
+        return self.file_count
 
     @property
     def fingerprint(self) -> str:
-        """Returns the digital signature of the tape."""
+        """Return the digital signature of the tape."""
         return self._stats["fingerprint"]
 
     @property
     def total_size(self) -> int:
-        """Returns the total size that the TAR stream will have (bytes)."""
+        """Return the total size of the TAR stream in bytes."""
         return self._stats["total_size"]
 
     @property
@@ -68,32 +105,29 @@ class Tape:
             return value
 
     def get_tracks(self):
-        """Returns all tracks sorted for the stream.
-
-        This method must be called within a 'with catalog'
-        """
-        with tartape.get_catalog(self.directory):
+        """Yield all tracks sorted for the stream."""
+        cat = self._get_catalog()
+        with cat, cat.db_session:
             yield from Track.select().order_by(Track.arc_path).iterator()
 
     def destroy(self):
-        if self._catalog:
-            self._catalog.close()
-            self._catalog = None
-
+        """Remove metadata artifacts (sidecar or legacy directory)."""
         metadata_dir = self.directory / TAPE_METADATA_DIR
         if metadata_dir.exists():
             shutil.rmtree(metadata_dir)
 
-    def verify(self, deep: bool = False, raise_exception: bool = False):
-        """Returns True if the tape is valid, False otherwise
+        if self.catalog_path and self.catalog_path.exists():
+            self.catalog_path.unlink()
+        else:
+            sidecar = self.directory.parent / f"{self.directory.name}{TAPE_EXTENSION}"
+            if sidecar.exists():
+                sidecar.unlink()
 
-        Exceptions:
-        - TarIntegrityError: If the tape fails integrity checks (only raised if raise_exception=True
-        - TapeVerificationError: If an unexpected error occurs during verification (only raised if raise_exception=True)
-
-        """
+    def verify(self, deep: bool = False, raise_exception: bool = False) -> bool:
+        """Verify whether physical disk state matches the tape catalog."""
         try:
-            with tartape.get_catalog(self.directory):
+            cat = self._get_catalog()
+            with cat, cat.db_session:
                 validate_root_structure_integrity(self.directory)
 
                 if deep:
@@ -107,12 +141,10 @@ class Tape:
                             validate_integrity(track, self.directory)
                 return True
         except TarIntegrityError:
-            # Let our specific integrity error bubble up if requested
             if raise_exception:
                 raise
             return False
         except Exception as e:
-            # Wrap any other unexpected errors (OS errors, DB errors)
             if raise_exception:
                 raise TapeVerificationError(
                     f"Unexpected error during verification: {e}"
@@ -120,17 +152,9 @@ class Tape:
             return False
 
     def _verify_resume_point_integrity(self, catalog: Catalog, absolute_offset: int):
-        """
-        Resuming a stream is a critical operation. We find the track at the
-        exact failure point and verify it hasn't mutated on disk.
-
-        This method must be called within a 'with catalog'
-        """
-
         if absolute_offset < 0 or absolute_offset >= self.total_size:
             raise InvalidOffsetError(f"Invalid resume offset: {absolute_offset}")
 
-        # The 'Footer Zone' (last 1024 bytes) has no files, it's just padding.
         if absolute_offset >= self.total_size - 1024:
             return
 
@@ -139,27 +163,76 @@ class Tape:
         entry = ManifestEntry.from_track(track, full_tape_window)
         validate_integrity(entry.info, self.directory)
 
-    def iter_volumes(self, size: int, naming_template: Optional[str] = None):
-        """It breaks the tape down into logical and physical volumes."""
-        chunker = TarChunker(chunk_size=size)
-        yield from chunker.iter_volumes(
-            directory=self.directory, naming_template=naming_template
-        )
+    def iter_volumes(
+        self,
+        size: int,
+        tag: Optional[str] = None,
+        is_default: bool = True,
+        naming_template: Optional[str] = None,
+    ) -> Generator[Volume, None, None]:
+        """Partition the tape into logical volumes and register the layout in the catalog."""
+        with self._get_catalog() as cat:
+            layout = cat.register_layout(
+                volume_size=size,
+                tag=tag,
+                is_default=is_default,
+                naming_template=naming_template,
+            )
+            vol_records = layout.volumes
+
+            for vol_rec in vol_records:
+                window = ByteWindow(start=vol_rec.start_offset, end=vol_rec.end_offset)
+                manifest = TarChunker.get_volume_manifest_for_range(
+                    fingerprint=self.fingerprint,
+                    vol_index=vol_rec.volume_index,
+                    volume_window=window,
+                    total_size=self.total_size,
+                )
+
+                volume = Volume(
+                    directory=self.directory,
+                    manifest=manifest,
+                    name=vol_rec.name,
+                    layout_tag=layout.tag,
+                    total_volumes=layout.total_volumes,
+                    catalog_path=cat.path,
+                )
+                yield volume
+
+    @property
+    def file_count(self) -> int:
+        """Return the total number of files in the tape."""
+        return self._track_count
+
+    def inspect(self) -> Generator[Track, None, None]:
+        """Yield recorded tracks in deterministic order without reading file content."""
+        cat = self._get_catalog()
+        with cat, cat.db_session:
+            yield from Track.select().order_by(Track.arc_path).iterator()
+
+    def as_file(self, buffer_size: int = 64 * 1024) -> TapeStreamReader:
+        """Expose the entire continuous TAR stream as an io.BufferedIOBase file-like object."""
+        self.verify(deep=False, raise_exception=True)
+        return TapeStreamReader(self, buffer_size=buffer_size)
 
     def play(
         self,
         start_offset: int = 0,
-        chunk_size: int = 64 * 1024,
+        buffer_size: int = 64 * 1024,
+        on_event: Optional[Callable[[TarEvent], None]] = None,
+        observer: Optional[TarObserver] = None,
         fast_verify: bool = True,
-    ) -> Generator:
+    ) -> Generator[bytes, None, None]:
+        """Stream raw TAR bytes directly while dispatching lifecycle telemetry in-band."""
         self.verify(deep=not fast_verify, raise_exception=True)
 
         tape_window = ByteWindow(start=0, end=self.total_size)
-        with tartape.get_catalog(self.directory) as cat:
+        cat = self._get_catalog()
+        with cat:
             if start_offset > 0:
                 self._verify_resume_point_integrity(cat, start_offset)
 
-            tracks = cat.query_tracks_intersecting_range(start_offset)
+            tracks = list(cat.query_tracks_intersecting_range(start_offset))
 
             def track_loader():
                 for track in tracks:
@@ -168,52 +241,78 @@ class Tape:
             engine = TarStreamGenerator(
                 track_loader(), self.directory, total_tape_size=self.total_size
             )
-            yield from engine.stream(start_offset=start_offset, chunk_size=chunk_size)
+            yield from engine.stream_bytes(
+                start_offset=start_offset,
+                chunk_size=buffer_size,
+                on_event=on_event,
+                observer=observer,
+            )
 
     def get_volume(
-        self, vol_name: str, vol_index: int, vol_start: int, vol_end: int
+        self,
+        index: int | str = 0,
+        size: int | None = None,
+        tag: Optional[str] = None,
+        vol_start: int | None = None,
+        vol_end: int | None = None,
     ) -> TapeVolume:
-        if not tartape.exists(self.directory):
-            raise TapeNotFoundError(f"The tape does not exist in: {self.directory}")
+        """Retrieve a specific volume by index or legacy parameters."""
+        cat = self._get_catalog()
+        if not cat.path.exists():
+            raise TapeNotFoundError(f"The tape catalog does not exist at: {cat.path}")
 
-        volume_window = ByteWindow(start=vol_start, end=vol_end)
-        if vol_start < 0 or vol_end > self.total_size or vol_start >= vol_end:
-            raise InvalidOffsetError(
-                f"Invalid range: {vol_start}-{vol_end}. Total tape size is {self.total_size}"
-            )
+        # Legacy 4-parameter mode support: (vol_name, vol_index, vol_start, vol_end)
+        if isinstance(index, str) and vol_start is not None and vol_end is not None:
+            vol_name = index
+            vol_index = int(size) if size is not None else 0
+            volume_window = ByteWindow(start=vol_start, end=vol_end)
+            if vol_start < 0 or vol_end > self.total_size or vol_start >= vol_end:
+                raise InvalidOffsetError(
+                    f"Invalid range: {vol_start}-{vol_end}. Total tape size is {self.total_size}"
+                )
+            with cat:
+                manifest = TarChunker.get_volume_manifest_for_range(
+                    self.fingerprint,
+                    vol_index,
+                    volume_window,
+                    total_size=self.total_size,
+                )
+            return Volume(self.directory, manifest, vol_name)
 
-        with Catalog.from_directory(self.directory):
+        vol_index = int(index)
+        with cat:
+            if tag is not None:
+                layout = cat.get_layout(tag)
+            elif size is not None:
+                try:
+                    layout = cat.get_layout(size)
+                except Exception:
+                    layout = cat.register_layout(volume_size=size, is_default=True)
+            else:
+                layout = cat.default_layout
+
+            vol_rec = layout.get_volume(vol_index)
+            window = ByteWindow(start=vol_rec.start_offset, end=vol_rec.end_offset)
             manifest = TarChunker.get_volume_manifest_for_range(
-                self.fingerprint, vol_index, volume_window, total_size=self.total_size
+                fingerprint=self.fingerprint,
+                vol_index=vol_rec.volume_index,
+                volume_window=window,
+                total_size=self.total_size,
             )
 
-        return FolderVolume(self.directory, manifest, vol_name)
+            return Volume(
+                directory=self.directory,
+                manifest=manifest,
+                name=vol_rec.name,
+                layout_tag=layout.tag,
+                total_volumes=layout.total_volumes,
+                catalog_path=cat.path,
+            )
 
     def get_file_slices(self, arc_path: str, chunk_size: int) -> list[FileSlice]:
-        """
-        Retrieve all FileSlices required to reconstruct or surgically download
-        a specific file across logical volumes.
-
-        Args:
-            arc_path: Archive relative path of the file to inspect.
-            chunk_size: Desired volume size in bytes (must be a multiple of 512).
-
-        Returns:
-            list[FileSlice]: Ordered slices needed to assemble the target file.
-        """
         chunker = TarChunker(chunk_size=chunk_size)
         return chunker.get_file_slices(self.directory, arc_path)
 
     def get_file_slices_map(self, chunk_size: int) -> dict[str, list[FileSlice]]:
-        """
-        Compute the complete map of FileSlices grouped by file across all volumes.
-
-        Args:
-            chunk_size: Desired volume size in bytes (must be a multiple of 512).
-
-        Returns:
-            dict[str, list[FileSlice]]: Mapping of {arc_path: [FileSlice, ...]}
-            for all regular files with content.
-        """
         chunker = TarChunker(chunk_size=chunk_size)
         return chunker.get_file_slices_map(self.directory)

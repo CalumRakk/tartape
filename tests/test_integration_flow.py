@@ -5,7 +5,6 @@ import time
 
 from tartape.exceptions import TarIntegrityError
 from tartape.recorder import TapeRecorder
-from tartape.schemas import TarFileDataEvent
 from tartape.tape import Tape
 from tests.base import TarTapeTestCase
 
@@ -21,19 +20,17 @@ class TestFlow(TarTapeTestCase):
         fingerprint = recorder.commit()
         self.assertIsNotNone(fingerprint)
 
-        # Reproducción y Captura del Stream
+        # Reproducción y Captura del Stream (emisión de bytes puros)
         tape = Tape(self.data_dir)
         tar_buffer = io.BytesIO()
-        for event in tape.play(fast_verify=False):
-            if isinstance(event, TarFileDataEvent):
-                tar_buffer.write(event.data)
+        for chunk in tape.play(fast_verify=False):
+            tar_buffer.write(chunk)
 
         tar_buffer.seek(0)
         with tarfile.open(fileobj=tar_buffer, mode="r:") as tf:
             members = tf.getnames()
 
             # Verificamos que los nombres en el TAR sigan nuestra estructura
-            # TarTape incluye el nombre de la carpeta raíz por diseño
             root_name = self.data_dir.name
             expected_files = [
                 f"{root_name}/root_file.txt",
@@ -60,9 +57,17 @@ class TestFlow(TarTapeTestCase):
         os.utime(self.data_dir, (past_time, past_time))
         tape = Tape(self.data_dir)
 
-        # Esto NO debe lanzar RuntimeError
-        events = list(tape.play(fast_verify=False))
-        self.assertTrue(any(e.type == "tape_completed" for e in events))
+        # Capturamos telemetría in-band vía on_event
+        completed = False
+
+        def on_event(ev):
+            nonlocal completed
+            if ev.type == "tape_completed":
+                completed = True
+
+        chunks = list(tape.play(fast_verify=False, on_event=on_event))
+        self.assertGreater(len(chunks), 0)
+        self.assertTrue(completed)
 
     def test_integrity_subdirectory_mtime_aborts(self):
         """ADR-002: El mtime de un SUB-directorio SÍ es crítico y debe abortar."""

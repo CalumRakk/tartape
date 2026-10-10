@@ -3,6 +3,7 @@ from typing import Optional, cast
 from peewee import (
     BooleanField,
     CharField,
+    CompositeKey,
     IntegerField,
     Model,
 )
@@ -89,3 +90,36 @@ class Track(BaseModel):
             linkname=self.linkname or "",
             md5sum=self.md5sum,
         )
+
+
+class LayoutRecord(BaseModel):
+    """
+    Represents a registered partitioning layout (slicing scheme) for a tape.
+    """
+
+    tag = cast(str, CharField(primary_key=True))
+    volume_size = cast(int, IntegerField())
+    total_volumes = cast(int, IntegerField())
+    created_at = cast(int, IntegerField())
+    is_default = cast(bool, BooleanField(default=False))
+
+    class Meta:  # type: ignore
+        table_name = "layouts"
+
+
+class VolumeRecord(BaseModel):
+    """
+    Represents a specific volume slice belonging to a registered layout.
+    """
+
+    layout_tag = cast(str, CharField())
+    volume_index = cast(int, IntegerField())
+    name = cast(str, CharField())
+    start_offset = cast(int, IntegerField())
+    end_offset = cast(int, IntegerField())
+    size = cast(int, IntegerField())
+    md5sum = cast(Optional[str], CharField(null=True))
+
+    class Meta:  # type: ignore
+        table_name = "volumes"
+        primary_key = CompositeKey("layout_tag", "volume_index")

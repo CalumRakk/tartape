@@ -3,7 +3,6 @@ import unittest
 from pathlib import Path
 
 import tartape
-from tartape.constants import TAR_BLOCK_SIZE, TAR_FOOTER_SIZE
 
 
 class TestFooterVolumeIntegrity(unittest.TestCase):
@@ -22,17 +21,16 @@ class TestFooterVolumeIntegrity(unittest.TestCase):
             total_size = tape.total_size
 
             # Chunk size chosen so the last volume touches only the footer
-            # A 512-byte multiple chunk_size
             chunk_size = 512
             vols = list(tape.iter_volumes(size=chunk_size))
             self.assertGreater(len(vols), 1)
 
             # Test each volume can be fully read to its declared size
             total_bytes_read = 0
-            for volume, manifest in vols:
+            for volume in vols:
                 with volume:
                     data = volume.read()
-                    self.assertEqual(len(data), manifest.chunk_size)
+                    self.assertEqual(len(data), volume.size)
                     self.assertTrue(volume.is_completed)
                     total_bytes_read += len(data)
 

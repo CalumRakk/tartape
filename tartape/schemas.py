@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Union
+from typing import TYPE_CHECKING, Any, Literal, Optional, Protocol, runtime_checkable
 
 from tartape.constants import TAR_BLOCK_SIZE
 
@@ -78,9 +78,20 @@ class TarTapeCompletedEvent:
     type: Literal["tape_completed"]
 
 
-TarEvent = Union[
-    TarFileStartEvent, TarFileDataEvent, TarFileEndEvent, TarTapeCompletedEvent
-]
+@runtime_checkable
+class TarObserver(Protocol):
+    """Protocol for structured in-band telemetry during tape playback."""
+
+    def on_file_start(self, event: TarFileStartEvent) -> None: ...
+
+    def on_file_end(self, event: TarFileEndEvent) -> None: ...
+
+    def on_tape_completed(self, event: TarTapeCompletedEvent) -> None: ...
+
+
+TarEvent = (
+    TarFileStartEvent | TarFileDataEvent | TarFileEndEvent | TarTapeCompletedEvent
+)
 
 
 @dataclass(frozen=True)
@@ -177,6 +188,25 @@ class FileSlice:
             "volume_length": self.volume_length,
             "source_offset": self.source_offset,
         }
+
+
+@dataclass(frozen=True)
+class FileGPS:
+    """Surgical location coordinates of a file across volume layouts."""
+
+    arc_path: str
+    file_size: int
+    fragments: list[FileSlice]
+
+    @property
+    def spans_multiple_volumes(self) -> bool:
+        """Returns True if the file content is split across more than one volume."""
+        return len(self.fragments) > 1
+
+    @property
+    def primary_volume_index(self) -> int | None:
+        """Returns the volume index of the first fragment, or None if empty."""
+        return self.fragments[0].volume_index if self.fragments else None
 
 
 @dataclass(frozen=True)

@@ -3,7 +3,6 @@ import tarfile
 
 from tartape.exceptions import PathConstraintReportError
 from tartape.recorder import TapeRecorder
-from tartape.schemas import TarFileDataEvent
 from tartape.tape import Tape
 from tests.base import TarTapeTestCase
 
@@ -40,7 +39,6 @@ class TestRecorder(TarTapeTestCase):
         Sin auto_truncate, una ruta profunda (>255 bytes) debe abortar la grabación
         mostrando la razón específica y sugiriendo 'auto_truncate=True'.
         """
-        # Creamos una anidación que supere ampliamente los 255 bytes (~310 bytes)
         deep_folder_chain = "/".join(
             [f"sub_nivel_con_nombre_largo_{i}" for i in range(10)]
         )
@@ -52,10 +50,8 @@ class TestRecorder(TarTapeTestCase):
             recorder.commit()
 
         error_msg = str(ctx.exception)
-        # Verifica que muestre la razón exacta de USTAR
         self.assertIn("exceeds USTAR 255 byte limit", error_msg)
-        # Verifica que muestre la sugerencia de activar auto_truncate
-        self.assertIn("use 'auto_truncate=True' in create()", error_msg)
+        self.assertIn("auto_truncate=True", error_msg)
 
     def test_deep_paths_with_auto_truncate_succeeds_and_extracts(self):
         """
@@ -67,35 +63,26 @@ class TestRecorder(TarTapeTestCase):
         expected_content = "Contenido ultra secreto en ruta profunda"
         self.create_file(f"{deep_folder_chain}/mi_archivo.txt", expected_content)
 
-        # Grabar con auto_truncate=True
         recorder = TapeRecorder(self.data_dir, auto_truncate=True)
         fingerprint = recorder.commit()
         self.assertIsNotNone(fingerprint)
 
-        # Reproducir la cinta y capturar el stream en memoria
         tape = Tape(self.data_dir)
         tar_buffer = io.BytesIO()
-        for event in tape.play(fast_verify=False):
-            if isinstance(event, TarFileDataEvent):
-                tar_buffer.write(event.data)
+        for chunk in tape.play(fast_verify=False):
+            tar_buffer.write(chunk)
 
-        # Validar la estructura del TAR con la librería estándar de Python
         tar_buffer.seek(0)
         with tarfile.open(fileobj=tar_buffer, mode="r") as tf:
             members = tf.getmembers()
-            # Debe existir la raíz, las carpetas intermedias y el archivo
             self.assertGreater(len(members), 1)
 
-            # Buscar el archivo final
             file_member = next(
                 (m for m in members if m.name.endswith("mi_archivo.txt")), None
             )
             self.assertIsNotNone(file_member, "No se encontró el archivo en el TAR")
-
-            # La ruta en el TAR debe ser <= 255 bytes
             self.assertLessEqual(len(file_member.name.encode("utf-8")), 255)
 
-            # Extraer y comprobar que los datos no se corrompieron
             f = tf.extractfile(file_member)
             self.assertIsNotNone(f)
             self.assertEqual(f.read().decode("utf-8"), expected_content)

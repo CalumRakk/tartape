@@ -1,10 +1,13 @@
 TAR_BLOCK_SIZE = 512
 TAR_FOOTER_SIZE = 1024
-CHUNK_SIZE_DEFAULT = 64 * 1024  # 64KB para lectura de disco
+CHUNK_SIZE_DEFAULT = 64 * 1024  # 64KB for disk reads
 
+# Sidecar metadata extension (zero-pollution)
+TAPE_EXTENSION = ".tartape"
+
+# Legacy directory name (kept for backwards compatibility detection)
 TAPE_METADATA_DIR = ".tartape"
 TAPE_DB_NAME = "index.db"
-
 
 DEFAULT_EXCLUDES = [
     ".DS_Store",
@@ -14,7 +17,6 @@ DEFAULT_EXCLUDES = [
     "*.db-shm",
     "*.sock",
 ]
-
 
 # --- Cache Configuration ---
 CACHE_DIR_NAME = "hash_cache"

@@ -9,115 +9,136 @@ from pathlib import Path
 from typing import Iterable, Optional, cast
 
 from tartape.cache import HashCacheManager
-from tartape.constants import TAPE_DB_NAME, TAPE_METADATA_DIR
-from tartape.database import DatabaseSession
+from tartape.constants import (
+    DEFAULT_EXCLUDES,
+    TAPE_EXTENSION,
+    TAPE_METADATA_DIR,
+    TAR_FOOTER_SIZE,
+)
+from tartape.database import DatabaseSession, seal_database
 from tartape.exceptions import PathConstraintError, PathConstraintReportError
 from tartape.factory import ExcludeType, TarEntryFactory
+from tartape.models import TapeMetadata, Track
 from tartape.schemas import EntryMetadata
-
-from .constants import DEFAULT_EXCLUDES, TAR_FOOTER_SIZE
-from .models import TapeMetadata, Track
 
 logger = logging.getLogger(__name__)
 
 
 class TapeRecorder:
+    """
+    Scans a source directory and records an immutable T0 catalog snapshot.
+    Builds the database in a temporary directory and seals it into a standalone
+    .tartape sidecar file without modifying the source directory.
+    """
+
     def __init__(
         self,
         directory: str | Path,
+        catalog_path: Optional[str | Path] = None,
         exclude: Optional[ExcludeType] = None,
         anonymize: bool = True,
         calculate_hashes: bool = False,
+        overwrite: bool = False,
         auto_truncate: bool = False,
     ):
         self.directory = Path(directory).resolve()
         self.calculate_hashes = calculate_hashes
-        self.cache: Optional[HashCacheManager] = None
         self.auto_truncate = auto_truncate
-
-        if self.calculate_hashes:
-            logger.info(
-                "Hash calculation is ENABLED. The engine will read the entire "
-                "dataset to compute MD5 sums during recording. "
-                "This may take a significant amount of time for massive datasets."
-            )
-            self.cache = HashCacheManager(self.directory)
+        self.overwrite = overwrite
 
         if not self.directory.is_dir():
             raise ValueError(f"Root path '{directory}' must be a directory.")
 
-        self.exclude = DEFAULT_EXCLUDES if exclude is None else exclude
-        self.anonymize = anonymize
-        self.tape_db_path = self.directory / TAPE_METADATA_DIR / TAPE_DB_NAME
-
-        if self.tape_db_path.exists():
-            raise FileExistsError(
-                f"Catalog already exists at: {self.tape_db_path}. "
-                "Use overwrite=True in create() to force a new recording."
+        # Resolve destination catalog path (sidecar by default)
+        if catalog_path is not None:
+            self.catalog_path = Path(catalog_path).resolve()
+        else:
+            self.catalog_path = (
+                self.directory.parent / f"{self.directory.name}{TAPE_EXTENSION}"
             )
 
+        if self.catalog_path.exists() and not self.overwrite:
+            raise FileExistsError(
+                f"Catalog already exists at: {self.catalog_path}. "
+                "Use overwrite=True to replace it."
+            )
+
+        self.exclude = DEFAULT_EXCLUDES if exclude is None else exclude
+        self.anonymize = anonymize
+
+        self.cache: Optional[HashCacheManager] = None
+        if self.calculate_hashes:
+            logger.info("Pre-computing file hashes during recording.")
+            self.cache = HashCacheManager(self.directory)
+
+        # Setup working database in isolated temporary directory
         self._temp_dir = tempfile.TemporaryDirectory()
-        self._temp_path = Path(self._temp_dir.name) / TAPE_DB_NAME
+        self._temp_path = Path(self._temp_dir.name) / "temp_index.db"
         self.temp_session = DatabaseSession(self._temp_path)
         self.db = self.temp_session.connect()
 
-        self._buffer = []
+        self._buffer: list[Track] = []
         self._batch_size = 300
 
-    def _calculate_fingerprint(self):
+    def _calculate_fingerprint(self) -> str:
         """Generates the identity hash based on the contents of the database."""
         sha = hashlib.sha256()
         for track in Track.select().order_by(Track.arc_path).iterator():
             sha.update(f"{track.arc_path}|{track.size}|{track.mtime}".encode())
         return sha.hexdigest()
 
-    def _finalize_storage(self):
-        dest_dir = self.directory / TAPE_METADATA_DIR
-        dest_dir.mkdir(exist_ok=True)
-        shutil.move(str(self._temp_path), str(self.tape_db_path))
+    def _finalize_storage(self) -> None:
+        """
+        Seals the temporary SQLite file and moves it atomically to the final destination.
+        """
+        self.catalog_path.parent.mkdir(parents=True, exist_ok=True)
 
-        logger.info(f"Catalog successfully recorded on: {self.tape_db_path}")
+        if self.catalog_path.exists() and self.overwrite:
+            if self.catalog_path.is_dir():
+                shutil.rmtree(self.catalog_path)
+            else:
+                self.catalog_path.unlink()
+
+        shutil.move(str(self._temp_path), str(self.catalog_path))
+        logger.info(f"Catalog successfully recorded at: {self.catalog_path}")
 
     def commit(self) -> str:
         """
         Freezes the tape state.
-        Calculates the Global Window (start_offset, end_offset) for every track.
+        Calculates global stream offsets for each track, stores metadata,
+        seals the database, and deploys the sidecar file.
 
-        Returns the signature (fingerprint).
+        Returns:
+            str: The digital fingerprint (SHA-256) of the tape.
         """
-
         try:
             self._run_discovery()
             self._flush_buffer()
 
             with self.db.atomic():
-                # ADR-001: Important for deterministic ordering
+                # ADR-001: Deterministic ordering by archive path
                 tracks = cast(
                     Iterable[Track], Track.select().order_by(Track.arc_path).iterator()
                 )
                 current_global_offset = 0
-                batch = []
+                batch: list[Track] = []
 
                 for track in tracks:
-                    # CALCULATE GLOBAL WINDOW
                     track.start_offset = current_global_offset
-
-                    # Advance the cursor by the full block size (Header + Content + Padding)
                     current_global_offset += track.total_block_size
-
                     track.end_offset = current_global_offset
                     batch.append(track)
 
-                    if len(batch) == self._batch_size:
+                    if len(batch) >= self._batch_size:
                         Track.bulk_update(
                             batch, fields=[Track.start_offset, Track.end_offset]
                         )
                         batch = []
+
                 if batch:
                     Track.bulk_update(
                         batch, fields=[Track.start_offset, Track.end_offset]
                     )
-                    batch = []
 
                 if callable(self.exclude):
                     func_name = getattr(self.exclude, "__name__", "custom_filter")
@@ -134,7 +155,13 @@ class TapeRecorder:
                 TapeMetadata.insert(key="created_at", value=capture_time).execute()
                 TapeMetadata.insert(key="exclude_patterns", value=exclude_val).execute()
 
+            # Close active Peewee session before sealing the database file
             self.temp_session.close()
+
+            # Seal the database to eliminate WAL/SHM artifacts
+            seal_database(self._temp_path)
+
+            # Move sealed database to the catalog destination
             self._finalize_storage()
             return fingerprint
 
@@ -142,14 +169,13 @@ class TapeRecorder:
             if hasattr(self, "temp_session"):
                 self.temp_session.close()
             if self.cache:
-                # Ensure cache is closed to flush any pending hashes
                 self.cache.close()
             self._temp_dir.cleanup()
 
-    def _run_discovery(self):
-        """Scans the filesystem in a deterministic manner."""
+    def _run_discovery(self) -> None:
+        """Scans the filesystem in a deterministic alphabetical order."""
         path_violations = []
-        # Validate the root folder name itself
+
         try:
             safe_root_name = TarEntryFactory.resolve_arcname(
                 self.directory.name, auto_truncate=self.auto_truncate, is_dir=True
@@ -168,7 +194,7 @@ class TapeRecorder:
             curr_dir, arc_prefix = stack.pop()
             try:
                 with os.scandir(curr_dir) as it:
-                    entries = sorted(list(it), key=lambda e: e.name)
+                    entries = sorted(it, key=lambda e: e.name)
                     for entry in entries:
                         full_path = Path(entry.path)
 
@@ -213,7 +239,7 @@ class TapeRecorder:
             advice = (
                 "Note: 'auto_truncate=True' is enabled, but some paths could not be automatically resolved."
                 if self.auto_truncate
-                else "To automatically shorten these paths and prevent collisions, use 'auto_truncate=True' in create()."
+                else "To automatically shorten these paths and prevent collisions, use 'auto_truncate=True' in record()."
             )
 
             raise PathConstraintReportError(
@@ -227,9 +253,8 @@ class TapeRecorder:
         source_path: Path,
         arcname: str,
         precomputed_stat: Optional[os.stat_result] = None,
-    ):
-        """Parses a file and adds it to the insert buffer."""
-
+    ) -> None:
+        """Parses an entry and appends it to the bulk insert buffer."""
         rel_path = source_path.relative_to(self.directory).as_posix()
         if rel_path == ".":
             rel_path = ""
@@ -262,13 +287,11 @@ class TapeRecorder:
             )
 
             self._buffer.append(track)
-
             if len(self._buffer) >= self._batch_size:
                 self._flush_buffer()
 
     def _should_exclude(self, path: Path) -> bool:
-        """Determines if a path should be skipped based on the 'self.exclude'."""
-
+        """Determines if a path should be skipped."""
         if TAPE_METADATA_DIR in path.parts:
             return True
         if self.exclude is None:
@@ -281,8 +304,8 @@ class TapeRecorder:
             return any(path.match(p) or path.name == p for p in self.exclude)
         return False
 
-    def _flush_buffer(self):
-        """Write the buffer to the database."""
+    def _flush_buffer(self) -> None:
+        """Writes buffered tracks to the database."""
         if not self._buffer:
             return
 
@@ -292,7 +315,7 @@ class TapeRecorder:
 
         self._buffer = []
 
-    def close(self):
+    def close(self) -> None:
         self.temp_session.close()
         if self.cache:
             self.cache.close()
