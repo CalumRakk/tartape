@@ -3,12 +3,12 @@ import logging
 import os
 import stat as stat_module
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, List, Optional, Union
+from typing import TYPE_CHECKING, Callable, Optional
 
-from tartape.constants import TAPE_METADATA_DIR
+from tartape.constants import DEFAULT_EXCLUDES, TAPE_METADATA_DIR
 from tartape.exceptions import PathConstraintError, TarIntegrityError
 from tartape.models import Track
-from tartape.schemas import DiskEntryStats, EntryMetadata
+from tartape.schemas import Discrepancy, DiskEntryStats, EntryMetadata
 
 if TYPE_CHECKING:
     from tartape.cache import HashCacheManager
@@ -21,10 +21,246 @@ except ImportError:
     grp = None
 
 
-ExcludeType = Union[str, List[str], Callable[[Path], bool]]
+ExcludeType = str | list[str] | Callable[[Path], bool]
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
+
+
+def should_exclude(path: Path | str, exclude: Optional[ExcludeType] = None) -> bool:
+    """Determine whether a path matches global or custom exclusion rules.
+
+    Args:
+        path: File or directory path to evaluate.
+        exclude: Glob pattern, list of patterns, callable, or None for defaults.
+
+    Returns:
+        bool: True if path should be ignored, False otherwise.
+    """
+    p = Path(path)
+    if TAPE_METADATA_DIR in p.parts:
+        return True
+
+    effective = DEFAULT_EXCLUDES if exclude is None else exclude
+
+    if callable(effective):
+        try:
+            return bool(effective(p))
+        except Exception:
+            return False
+
+    if isinstance(effective, str):
+        return p.match(effective) or p.name == effective
+
+    if isinstance(effective, (list, tuple, set)):
+        return any(p.match(pattern) or p.name == pattern for pattern in effective)
+
+    return False
+
+
+def check_directory_structural_integrity(
+    expected: EntryMetadata | Track,
+    tape_root_directory: Path,
+    exclude: Optional[ExcludeType] = None,
+) -> Optional[Discrepancy]:
+    """Verify structural integrity of a directory while tolerating excluded OS artifacts.
+
+    If directory mtime changed, inspects disk children:
+    - If untracked, non-excluded files exist -> untracked_item discrepancy.
+    - If NO excluded items exist to explain the mtime mutation -> structural_change discrepancy.
+    - If excluded items (e.g. .DS_Store) exist and all other items are tracked -> tolerated as OS noise.
+    """
+    full_disk_path = Path(tape_root_directory) / expected.rel_path
+    stats = TarEntryFactory.inspect(full_disk_path)
+
+    if not stats.exists:
+        return Discrepancy(
+            arc_path=expected.arc_path,
+            rel_path=expected.rel_path,
+            reason="missing",
+            message=f"Directory missing: '{expected.arc_path}'",
+        )
+
+    # Root directory is audited separately by validate_root_structure_integrity
+    if expected.rel_path in ("", "."):
+        return None
+
+    # Fast path: mtime is perfectly intact
+    if stats.mtime == expected.mtime:
+        return None
+
+    # Defensive path: mtime changed, inspect directory contents
+    try:
+        untracked_unexcluded: list[str] = []
+        has_excluded_items = False
+
+        with os.scandir(full_disk_path) as it:
+            for entry in it:
+                entry_path = Path(entry.path)
+                if should_exclude(entry_path, exclude):
+                    has_excluded_items = True
+                    continue
+
+                child_rel = (
+                    f"{expected.rel_path}/{entry.name}"
+                    if expected.rel_path
+                    else entry.name
+                )
+                is_tracked = Track.select().where(Track.rel_path == child_rel).exists()
+                if not is_tracked:
+                    untracked_unexcluded.append(entry.name)
+
+        if untracked_unexcluded:
+            return Discrepancy(
+                arc_path=expected.arc_path,
+                rel_path=expected.rel_path,
+                reason="untracked_item",
+                found=untracked_unexcluded,
+                message=(
+                    f"Directory '{expected.arc_path}' contains untracked items: "
+                    f"{', '.join(untracked_unexcluded)}"
+                ),
+            )
+
+        # If mtime changed and NO excluded items exist to explain the mutation,
+        # it is a critical structural integrity violation per ADR-002.
+        if not has_excluded_items:
+            return Discrepancy(
+                arc_path=expected.arc_path,
+                rel_path=expected.rel_path,
+                reason="structural_change",
+                expected=expected.mtime,
+                found=stats.mtime,
+                message=f"Directory structure changed: {expected.arc_path}",
+            )
+
+    except OSError as e:
+        return Discrepancy(
+            arc_path=expected.arc_path,
+            rel_path=expected.rel_path,
+            reason="structural_change",
+            message=f"Error accessing directory '{expected.arc_path}': {e}",
+        )
+
+    return None
+
+
+def check_entry_integrity(
+    expected: EntryMetadata | Track,
+    tape_root_directory: Path,
+    exclude: Optional[ExcludeType] = None,
+) -> Optional[Discrepancy]:
+    """Perform integrity check on a single entry, returning Discrepancy if invalid.
+
+    Args:
+        expected: Track or EntryMetadata from catalog baseline.
+        tape_root_directory: Physical root directory on disk.
+        exclude: Exclusion rules to tolerate OS artifacts in directories.
+
+    Returns:
+        Optional[Discrepancy]: None if intact, Discrepancy object if mutated or missing.
+    """
+    full_disk_path = Path(tape_root_directory) / expected.rel_path
+    stats = TarEntryFactory.inspect(full_disk_path)
+
+    if not stats.exists:
+        return Discrepancy(
+            arc_path=expected.arc_path,
+            rel_path=expected.rel_path,
+            reason="missing",
+            message=f"File missing: {expected.arc_path}",
+        )
+
+    if expected.is_dir:
+        return check_directory_structural_integrity(
+            expected, tape_root_directory, exclude=exclude
+        )
+
+    if stats.mtime != expected.mtime:
+        return Discrepancy(
+            arc_path=expected.arc_path,
+            rel_path=expected.rel_path,
+            reason="mtime_mismatch",
+            expected=expected.mtime,
+            found=stats.mtime,
+            message=f"File modified (mtime): {expected.arc_path}",
+        )
+
+    if not expected.is_symlink and stats.size != expected.size:
+        return Discrepancy(
+            arc_path=expected.arc_path,
+            rel_path=expected.rel_path,
+            reason="size_mismatch",
+            expected=expected.size,
+            found=stats.size,
+            message=f"File size changed: {expected.arc_path}",
+        )
+
+    return None
+
+
+def validate_integrity(
+    expected: EntryMetadata | Track,
+    tape_root_directory: Path,
+    exclude: Optional[ExcludeType] = None,
+) -> None:
+    """Strict implementation of ADR-002 Fail-Fast for streaming runtime guard."""
+    discrepancy = check_entry_integrity(expected, tape_root_directory, exclude=exclude)
+    if discrepancy:
+        raise TarIntegrityError(discrepancy.message)
+
+
+def validate_root_structure_integrity(
+    root_path: Path,
+    exclude: Optional[ExcludeType] = None,
+    raise_exception: bool = True,
+) -> Optional[Discrepancy]:
+    """Check root directory structure for untracked items, respecting exclusion rules."""
+    try:
+        disk_items = []
+        with os.scandir(root_path) as it:
+            for entry in it:
+                if entry.name == TAPE_METADATA_DIR:
+                    continue
+                entry_path = Path(entry.path)
+                if should_exclude(entry_path, exclude):
+                    continue
+                disk_items.append(entry.name)
+    except OSError as e:
+        msg = f"Root directory is inaccessible: {e}"
+        if raise_exception:
+            raise TarIntegrityError(msg) from e
+        return Discrepancy(
+            arc_path="",
+            rel_path="",
+            reason="structural_change",
+            message=msg,
+        )
+
+    tracked_root_items = set(
+        Track.select(Track.rel_path)
+        .where((Track.rel_path != "") & (~Track.rel_path.contains("/")))  # type: ignore
+        .scalars()
+    )
+
+    untracked = [name for name in disk_items if name not in tracked_root_items]
+
+    if untracked:
+        msg = (
+            f"Integrity compromised: {len(untracked)} untracked item(s) "
+            f"detected in root directory ({', '.join(untracked[:5])})."
+        )
+        if raise_exception:
+            raise TarIntegrityError(msg)
+        return Discrepancy(
+            arc_path="",
+            rel_path="",
+            reason="untracked_item",
+            found=untracked,
+            message=msg,
+        )
+
+    return None
 
 
 def validate_ustar_path(
@@ -72,6 +308,37 @@ def validate_ustar_path(
         )
 
     return True, None
+
+
+def truncate_component_safe(component: str, max_bytes: int = 100) -> str:
+    """
+    Truncates a path component to a maximum byte length, ensuring
+    UTF-8 validity and preventing name collisions via hashing.
+    """
+    comp_bytes = component.encode("utf-8")
+
+    if len(comp_bytes) <= max_bytes:
+        return component
+
+    hash_suffix = hashlib.md5(comp_bytes).hexdigest()[:14]
+    limit_for_prefix = max_bytes - 15
+
+    prefix_bytes = comp_bytes[:limit_for_prefix]
+
+    # Decode back to string. 'ignore' is crucial: if byte 85 was the
+    # start of a 4-byte emoji, it will be dropped, preventing
+    # "Invalid UTF-8" errors.
+    safe_prefix = prefix_bytes.decode("utf-8", errors="ignore")
+
+    result = f"{safe_prefix}_{hash_suffix}"
+
+    # If this fails, we decrease the prefix length further.
+    # This handles edge cases with certain multi-byte combining characters.
+    while len(result.encode("utf-8")) > max_bytes:
+        safe_prefix = safe_prefix[:-1]
+        result = f"{safe_prefix}_{hash_suffix}"
+
+    return result
 
 
 def shorten_path_ustar(arcname: str, is_dir: bool = False) -> str:
@@ -142,37 +409,6 @@ def shorten_path_ustar(arcname: str, is_dir: bool = False) -> str:
         shortened_prefix = base_prefix
 
     return f"{shortened_prefix}/{leaf}"
-
-
-def truncate_component_safe(component: str, max_bytes: int = 100) -> str:
-    """
-    Truncates a path component to a maximum byte length, ensuring
-    UTF-8 validity and preventing name collisions via hashing.
-    """
-    comp_bytes = component.encode("utf-8")
-
-    if len(comp_bytes) <= max_bytes:
-        return component
-
-    hash_suffix = hashlib.md5(comp_bytes).hexdigest()[:14]
-    limit_for_prefix = max_bytes - 15
-
-    prefix_bytes = comp_bytes[:limit_for_prefix]
-
-    # Decode back to string. 'ignore' is crucial: if byte 85 was the
-    # start of a 4-byte emoji, it will be dropped, preventing
-    # "Invalid UTF-8" errors.
-    safe_prefix = prefix_bytes.decode("utf-8", errors="ignore")
-
-    result = f"{safe_prefix}_{hash_suffix}"
-
-    # If this fails, we decrease the prefix length further.
-    # This handles edge cases with certain multi-byte combining characters.
-    while len(result.encode("utf-8")) > max_bytes:
-        safe_prefix = safe_prefix[:-1]
-        result = f"{safe_prefix}_{hash_suffix}"
-
-    return result
 
 
 class TarEntryFactory:
@@ -296,7 +532,7 @@ class TarEntryFactory:
     @classmethod
     def create_metadata(
         cls,
-        source_path: Union[Path, str],
+        source_path: Path | str,
         rel_path: str,
         arcname: str,
         anonymize: bool = True,
@@ -386,63 +622,3 @@ class TarEntryFactory:
 
         # We snap to a clean POSIX standard to eliminate environmental noise.
         return 0o755 if is_executable else 0o644
-
-
-def validate_integrity(
-    expected: EntryMetadata | Track, tape_root_directory: Path
-) -> None:
-    """
-    Strict implementation of ADR-002.
-    Compares the expected pure metadata against the current physical disk state.
-    Raises TarIntegrityError if any discrepancy is found.
-    """
-    full_disk_path = Path(tape_root_directory) / expected.rel_path
-    stats = TarEntryFactory.inspect(full_disk_path)
-
-    if not stats.exists:
-        raise TarIntegrityError(f"File missing: {expected.arc_path}")
-
-    # ADR-002: Directory structural integrity
-    if expected.is_dir:
-        if expected.rel_path in ("", "."):
-            return  # Root directory mtime is ignored
-        if stats.mtime != expected.mtime:
-            raise TarIntegrityError(f"Directory structure changed: {expected.arc_path}")
-        return
-
-    # ADR-002: File integrity
-    if stats.mtime != expected.mtime:
-        raise TarIntegrityError(f"File modified (mtime): {expected.arc_path}")
-
-    if not expected.is_symlink:
-        if stats.size != expected.size:
-            raise TarIntegrityError(f"File size changed: {expected.arc_path}")
-
-
-def validate_root_structure_integrity(root_path: Path) -> None:
-    """
-    Checks if the root directory structure has been compromised by adding
-    new untracked items. This complements ADR-002, where the root
-    mtime is ignored.
-    """
-    try:
-        disk_items_count = 0
-        with os.scandir(root_path) as it:
-            for entry in it:
-                if entry.name != TAPE_METADATA_DIR:
-                    disk_items_count += 1
-    except OSError as e:
-        raise TarIntegrityError(f"Root directory is inaccessible: {e}")
-
-    db_items_count = (
-        Track.select()
-        .where((Track.rel_path != "") & (~Track.rel_path.contains("/")))  # type: ignore
-        .count()
-    )
-
-    if disk_items_count > db_items_count:
-        diff = disk_items_count - db_items_count
-        raise TarIntegrityError(
-            f"Integrity compromised: {diff} untracked item(s) detected in root directory. "
-            f"The dataset no longer matches the T0 snapshot."
-        )

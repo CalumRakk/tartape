@@ -12,12 +12,11 @@ from tartape.cache import HashCacheManager
 from tartape.constants import (
     DEFAULT_EXCLUDES,
     TAPE_EXTENSION,
-    TAPE_METADATA_DIR,
     TAR_FOOTER_SIZE,
 )
 from tartape.database import DatabaseSession, seal_database
 from tartape.exceptions import PathConstraintError, PathConstraintReportError
-from tartape.factory import ExcludeType, TarEntryFactory
+from tartape.factory import ExcludeType, TarEntryFactory, should_exclude
 from tartape.models import TapeMetadata, Track
 from tartape.schemas import EntryMetadata
 
@@ -292,17 +291,7 @@ class TapeRecorder:
 
     def _should_exclude(self, path: Path) -> bool:
         """Determines if a path should be skipped."""
-        if TAPE_METADATA_DIR in path.parts:
-            return True
-        if self.exclude is None:
-            return False
-        if callable(self.exclude):
-            return self.exclude(path)
-        if isinstance(self.exclude, str):
-            return path.match(self.exclude) or path.name == self.exclude
-        if isinstance(self.exclude, list):
-            return any(path.match(p) or path.name == p for p in self.exclude)
-        return False
+        return should_exclude(path, self.exclude)
 
     def _flush_buffer(self) -> None:
         """Writes buffered tracks to the database."""

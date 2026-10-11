@@ -2,11 +2,10 @@ import json
 import logging
 import os
 import shutil
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Generator, Optional
-
-import peewee
 
 from tartape.catalog import Catalog
 from tartape.chunker import TarChunker
@@ -17,9 +16,21 @@ from tartape.exceptions import (
     TapeVerificationError,
     TarIntegrityError,
 )
-from tartape.factory import validate_integrity, validate_root_structure_integrity
+from tartape.factory import (
+    check_entry_integrity,
+    validate_integrity,
+    validate_root_structure_integrity,
+)
 from tartape.models import Track
-from tartape.schemas import ByteWindow, FileSlice, ManifestEntry, TarEvent, TarObserver
+from tartape.schemas import (
+    ByteWindow,
+    Discrepancy,
+    FileSlice,
+    ManifestEntry,
+    TarEvent,
+    TarObserver,
+    VerificationReport,
+)
 from tartape.stream import (
     TapeStreamReader,
     TapeVolume,
@@ -114,7 +125,7 @@ class Tape(os.PathLike):
         value = self._stats["exclude_patterns"]
         try:
             return json.loads(value)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, TypeError):
             return value
 
     def get_tracks(self):
@@ -136,34 +147,157 @@ class Tape(os.PathLike):
             if sidecar.exists():
                 sidecar.unlink()
 
-    def verify(self, deep: bool = False, raise_exception: bool = False) -> bool:
-        """Verify whether physical disk state matches the tape catalog."""
+    def _select_canary_tracks(self, total_tracks: int) -> list[Track]:
+        """Select strategic sentinel tracks for ultra-fast canary verification.
+
+        Combines boundary tracks, volatile hot-files, structural directories,
+        and stratified offset deciles without using non-deterministic table scans.
+        """
+        # Small dataset graceful fallback: verify 100% of tracks if count <= 50
+        if total_tracks <= 50:
+            return list(Track.select().order_by(Track.arc_path))
+
+        canaries: dict[str, Track] = {}
+
+        # Boundary Sentinels: First and Last tracks in the archive stream
+        first_track = Track.select().order_by(Track.start_offset.asc()).first()  # type: ignore
+        if first_track:
+            canaries[first_track.arc_path] = first_track
+
+        last_track = Track.select().order_by(Track.start_offset.desc()).first()  # type: ignore
+        if last_track:
+            canaries[last_track.arc_path] = last_track
+
+        # Structural Sentinels: All recorded directories (catches additions/deletions)
+        for dir_track in Track.select().where(Track.is_dir == True):
+            canaries[dir_track.arc_path] = dir_track
+
+        # Volatility Sentinels: Top 10 most recently modified regular files at T0
+        hot_tracks = (
+            Track.select()
+            .where((Track.is_dir == False) & (Track.is_symlink == False))
+            .order_by(Track.mtime.desc())  # type: ignore
+            .limit(10)
+        )
+        for hot_track in hot_tracks:
+            canaries[hot_track.arc_path] = hot_track
+
+        # Decile Strata Sentinels: Deterministic offset probes across tape coordinates
+        if self.total_size > 0:
+            for step in range(1, 10):
+                target_offset = int(self.total_size * (step / 10.0))
+                decile_track = (
+                    Track.select()
+                    .where(
+                        (Track.start_offset <= target_offset)
+                        & (Track.end_offset > target_offset)
+                    )
+                    .first()
+                )
+                if decile_track:
+                    canaries[decile_track.arc_path] = decile_track
+
+        return list(canaries.values())
+
+    def verify(
+        self, deep: bool = True, raise_exception: bool = False
+    ) -> VerificationReport:
+        """Verify whether physical disk state matches the recorded tape catalog.
+
+        Args:
+            deep: If True, performs a thorough 100% audit of all recorded tracks.
+                If False, runs an ultra-fast canary audit using boundary, hot-file,
+                structural, and decile sentinels.
+            raise_exception: If True, immediately raises TarIntegrityError on the
+                first detected discrepancy instead of returning a report.
+
+        Returns:
+            VerificationReport: Rich audit report indicating validity and discrepancies.
+
+        Raises:
+            TarIntegrityError: If raise_exception is True and a discrepancy is found.
+            TapeVerificationError: If an unexpected system error occurs during verification.
+        """
+        start_time = time.perf_counter()
+        discrepancies: list[Discrepancy] = []
+
         try:
             cat = self._get_catalog()
             with cat, cat.db_session:
-                validate_root_structure_integrity(self.directory)
+                total_tracks = Track.select().count()
 
+                # Structural check on root directory with exclusion awareness
+                root_discrepancy = validate_root_structure_integrity(
+                    self.directory,
+                    exclude=self.exclude_patterns,
+                    raise_exception=raise_exception,
+                )
+                if root_discrepancy:
+                    discrepancies.append(root_discrepancy)
+
+                # Select tracks based on verification mode
                 if deep:
-                    for track in Track.select().order_by(Track.arc_path).iterator():
-                        validate_integrity(track, self.directory)
+                    tracks_to_check = Track.select().order_by(Track.arc_path)
                 else:
-                    total = Track.select().count()
-                    if total > 0:
-                        samples = Track.select().order_by(peewee.fn.Random()).limit(15)
-                        # TODO: It should be a percentage of the files, rather than a hard-coded value.
-                        for track in samples:
-                            validate_integrity(track, self.directory)
-                return True
+                    tracks_to_check = self._select_canary_tracks(total_tracks)
+
+                checked_count = 0
+                for track in tracks_to_check:
+                    checked_count += 1
+                    discrepancy = check_entry_integrity(
+                        track,
+                        self.directory,
+                        exclude=self.exclude_patterns,
+                    )
+                    if discrepancy:
+                        if raise_exception:
+                            raise TarIntegrityError(discrepancy.message)
+                        discrepancies.append(discrepancy)
+
+                duration_ms = (time.perf_counter() - start_time) * 1000.0
+                return VerificationReport(
+                    is_valid=len(discrepancies) == 0,
+                    mode="deep" if deep else "canary",
+                    total_tracks=total_tracks,
+                    checked_count=checked_count,
+                    duration_ms=duration_ms,
+                    discrepancies=discrepancies,
+                )
+
         except TarIntegrityError:
             if raise_exception:
                 raise
-            return False
+            duration_ms = (time.perf_counter() - start_time) * 1000.0
+            return VerificationReport(
+                is_valid=False,
+                mode="deep" if deep else "canary",
+                total_tracks=self._track_count,
+                checked_count=0,
+                duration_ms=duration_ms,
+                discrepancies=discrepancies,
+            )
         except Exception as e:
             if raise_exception:
                 raise TapeVerificationError(
                     f"Unexpected error during verification: {e}"
                 ) from e
-            return False
+            duration_ms = (time.perf_counter() - start_time) * 1000.0
+            discrepancies.append(
+                Discrepancy(
+                    arc_path="",
+                    rel_path="",
+                    reason="structural_change",
+                    message=f"Verification failed due to unexpected error: {e}",
+                )
+            )
+            return VerificationReport(
+                is_valid=False,
+                mode="deep" if deep else "canary",
+                total_tracks=self._track_count,
+                checked_count=0,
+                duration_ms=duration_ms,
+                discrepancies=discrepancies,
+            )
 
     def _verify_resume_point_integrity(self, catalog: Catalog, absolute_offset: int):
         if absolute_offset < 0 or absolute_offset >= self.total_size:

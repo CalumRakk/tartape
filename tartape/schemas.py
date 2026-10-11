@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Optional, Protocol, runtime_checkable
@@ -339,3 +339,65 @@ class VolumeManifest:
             "total_size": self.total_size,
             "entries": self.entries,
         }
+
+
+@dataclass(frozen=True)
+class Discrepancy:
+    """Detailed description of an integrity discrepancy found on disk."""
+
+    arc_path: str
+    rel_path: str
+    reason: Literal[
+        "missing",
+        "size_mismatch",
+        "mtime_mismatch",
+        "untracked_item",
+        "structural_change",
+    ]
+    expected: Optional[Any] = None
+    found: Optional[Any] = None
+    message: str = ""
+
+
+@dataclass
+class VerificationReport:
+    """Comprehensive report summarizing tape verification results against physical disk state."""
+
+    is_valid: bool
+    mode: Literal["deep", "canary"]
+    total_tracks: int
+    checked_count: int
+    duration_ms: float = 0.0
+    discrepancies: list[Discrepancy] = field(default_factory=list)
+
+    def __bool__(self) -> bool:
+        """Return True if verification passed with zero discrepancies."""
+        return self.is_valid
+
+    @property
+    def error_count(self) -> int:
+        """Return the total number of detected discrepancies."""
+        return len(self.discrepancies)
+
+    @property
+    def errors(self) -> list[Discrepancy]:
+        """Convenience alias for discrepancies."""
+        return self.discrepancies
+
+    def summary(self) -> str:
+        """Generate a formatted human-readable summary of the verification results."""
+        status = "PASSED" if self.is_valid else "FAILED"
+        header = (
+            f"Verification [{self.mode.upper()}] {status}: "
+            f"{self.checked_count}/{self.total_tracks} tracks checked "
+            f"in {self.duration_ms:.2f}ms."
+        )
+        if self.is_valid:
+            return header
+
+        lines = [header, f"Discrepancies found ({self.error_count}):"]
+        for d in self.discrepancies[:20]:
+            lines.append(f"  - [{d.reason}] {d.arc_path}: {d.message}")
+        if len(self.discrepancies) > 20:
+            lines.append(f"  ... and {len(self.discrepancies) - 20} more.")
+        return "\n".join(lines)

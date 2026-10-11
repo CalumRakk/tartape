@@ -27,7 +27,15 @@ from tartape.exceptions import (
 )
 from tartape.factory import ExcludeType
 from tartape.recorder import TapeRecorder
-from tartape.schemas import FileGPS, FileSlice, ManifestEntry, TarEvent, TarObserver
+from tartape.schemas import (
+    Discrepancy,
+    FileGPS,
+    FileSlice,
+    ManifestEntry,
+    TarEvent,
+    TarObserver,
+    VerificationReport,
+)
 from tartape.stream import Volume
 from tartape.tape import Tape
 from tartape.units import format_size, parse_size
@@ -126,12 +134,12 @@ def discover(directory: str | Path) -> Optional[Path]:
     if not target_dir.is_dir():
         return None
 
-    # 1. Primary: Sidecar file alongside the folder
+    # Primary: Sidecar file alongside the folder
     sidecar = target_dir.parent / f"{target_dir.name}{TAPE_EXTENSION}"
     if sidecar.exists() and sidecar.is_file():
         return sidecar
 
-    # 2. Fallback: Legacy .tartape/index.db inside the folder
+    # Fallback: Legacy .tartape/index.db inside the folder
     legacy = target_dir / TAPE_METADATA_DIR / TAPE_DB_NAME
     if legacy.exists() and legacy.is_file():
         return legacy
@@ -144,6 +152,7 @@ create = record
 __all__ = [
     "AmbiguousLayoutError",
     "Catalog",
+    "Discrepancy",
     "FileGPS",
     "FileSlice",
     "InvalidOffsetError",
@@ -160,6 +169,7 @@ __all__ = [
     "TarIntegrityError",
     "TarObserver",
     "TarTapeError",
+    "VerificationReport",
     "Volume",
     "VolumeChecksumMismatchError",
     "VolumeNotFoundError",

@@ -275,18 +275,26 @@ tape = tartape.record(
 ---
 
 ### 8. Checking for File Changes Before Streaming
-TarTape ensures that what you stream matches what was originally scanned. You can run a quick check before starting a transfer:
+TarTape ensures what you stream matches what was originally scanned. You can inspect your dataset using full audits or ultra-fast canary spot-checks:
 
 ```python
 import tartape
 
 with tartape.open("./my_dataset") as tape:
-    # Performs a fast spot-check across files
-    if not tape.verify():
-        print("Warning: Files were modified or deleted after indexing!")
+    # Full 100% audit (default) returning a rich diagnostic report
+    report = tape.verify()
 
-    # Or perform a thorough audit of every single file:
-    # tape.verify(deep=True)
+    if not report:
+        print(f"Audit failed! Found {report.error_count} discrepancies:")
+        for error in report.errors:
+            print(f"  - [{error.reason}] {error.arc_path}: {error.message}")
+    else:
+        print(
+            report.summary()
+        )  # e.g., "Verification [DEEP] PASSED: 4,200/4,200 tracks checked in 18.4ms."
+
+    # Or run an ultra-fast Canary check (<15ms) across boundary and volatile sentinels:
+    # canary_report = tape.verify(deep=False)
 ```
 
 ---
@@ -327,5 +335,5 @@ tape = tartape.record("./my_dataset", auto_truncate=True)
 | `tape.play(start_offset=0)` | Yields raw chunks of bytes directly, with optional byte-accurate resumption. |
 | `tape.iter_volumes(size="1GB")` | Yields the archive split into file-like chunks (accepts `"100MB"`, `"1GB"`, `"2GB"`, etc.). |
 | `tape.get_volume(index, size="1GB")` | Retrieves a specific volume directly without iterating through previous parts. |
-| `tape.verify(deep=False)` | Checks if local files on disk match the recorded index. |
+| `tape.verify(deep=True)` | Checks if local files on disk match the recorded index. |
 | `catalog.locate(arc_path)` | Returns coordinates and precalculated `range_header` for each file fragment. |
