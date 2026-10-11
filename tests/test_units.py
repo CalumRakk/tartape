@@ -164,9 +164,9 @@ class TestUnitsLayoutIntegration(unittest.TestCase):
         layout_int = cat.get_layout(50 * 1024 * 1024)
         self.assertEqual(layout_int.tag, "50MB")
 
-        # Layout inexistente debe lanzar LayoutNotFoundError
+        # Layout completamente inválido o desconocido debe lanzar LayoutNotFoundError
         with self.assertRaises(LayoutNotFoundError):
-            cat.get_layout("999GB")
+            cat.get_layout("FOO_BAR")
 
     def test_iter_volumes_with_integer_generates_canonical_tag(self):
         """Verifica que pasar enteros (ej. 1024^3) genere automáticamente el tag canónico '1GB'."""

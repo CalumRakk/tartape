@@ -16,6 +16,8 @@ from tartape.exceptions import (
     LayoutNotFoundError,
     PathConstraintError,
     PathConstraintReportError,
+    ReadOnlyCatalogError,
+    SourceNotFoundError,
     TapeCorruptedError,
     TapeNotFoundError,
     TapeVerificationError,
@@ -35,10 +37,14 @@ from tartape.schemas import (
     FileSlice,
     ManifestEntry,
     TarEvent,
+    TarFileDataEvent,
+    TarFileEndEvent,
+    TarFileStartEvent,
     TarObserver,
+    TarTapeCompletedEvent,
     VerificationReport,
 )
-from tartape.stream import Volume
+from tartape.stream import TapeStreamReader, Volume
 from tartape.tape import Tape
 from tartape.units import format_size, parse_size
 
@@ -171,13 +177,20 @@ __all__ = [
     "ManifestEntry",
     "PathConstraintError",
     "PathConstraintReportError",
+    "ReadOnlyCatalogError",
+    "SourceNotFoundError",
     "Tape",
     "TapeCorruptedError",
     "TapeNotFoundError",
+    "TapeStreamReader",
     "TapeVerificationError",
     "TarEvent",
+    "TarFileDataEvent",
+    "TarFileEndEvent",
+    "TarFileStartEvent",
     "TarIntegrityError",
     "TarObserver",
+    "TarTapeCompletedEvent",
     "TarTapeError",
     "VerificationReport",
     "Volume",

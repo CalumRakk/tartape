@@ -10,11 +10,10 @@ from tartape.constants import CACHE_DIR_NAME, CACHE_MAX_FILES, CACHE_MAX_SIZE_MB
 
 logger = logging.getLogger(__name__)
 
-cache_db = peewee.SqliteDatabase(None)
 
-
+# Base schema model unbound by default
 class HashStore(peewee.Model):
-    """Peewee model for the global file checksum cache."""
+    """Peewee model for the file checksum cache."""
 
     arc_path = peewee.CharField()
     size = peewee.IntegerField()
@@ -23,7 +22,6 @@ class HashStore(peewee.Model):
     checksum = peewee.CharField()
 
     class Meta:
-        database = cache_db
         primary_key = peewee.CompositeKey("arc_path", "size", "mtime", "algorithm")
 
 
@@ -59,15 +57,17 @@ class HashCacheManager:
         db_name = generate_cache_db_name(target_directory)
         self.db_path = self.cache_dir / db_name
 
-        cache_db.init(
+        # Instance-isolated database connection
+        self.db = peewee.SqliteDatabase(
             str(self.db_path),
             pragmas={
                 "journal_mode": "wal",
                 "synchronous": "NORMAL",
             },
         )
-        cache_db.connect(reuse_if_open=True)
-        cache_db.create_tables([HashStore], safe=True)
+        self.db.connect(reuse_if_open=True)
+        with self.db.bind_ctx([HashStore]):
+            self.db.create_tables([HashStore], safe=True)
 
         self._batch = []
         self._accumulated_weight = 0
@@ -120,13 +120,14 @@ class HashCacheManager:
         self, arc_path: str, size: int, mtime: int, algorithm: str = "sha256"
     ) -> Optional[str]:
         try:
-            record = HashStore.get(
-                (HashStore.arc_path == arc_path)
-                & (HashStore.size == size)
-                & (HashStore.mtime == mtime)
-                & (HashStore.algorithm == algorithm)
-            )
-            return record.checksum
+            with self.db.bind_ctx([HashStore]):
+                record = HashStore.get(
+                    (HashStore.arc_path == arc_path)
+                    & (HashStore.size == size)
+                    & (HashStore.mtime == mtime)
+                    & (HashStore.algorithm == algorithm)
+                )
+                return record.checksum
         except HashStore.DoesNotExist:  # type: ignore
             return None
 
@@ -156,7 +157,7 @@ class HashCacheManager:
         if not self._batch:
             return
 
-        with cache_db.atomic():
+        with self.db.bind_ctx([HashStore]), self.db.atomic():
             HashStore.insert_many(self._batch).on_conflict_replace().execute()
 
         self._batch = []
@@ -164,8 +165,8 @@ class HashCacheManager:
 
     def close(self) -> None:
         self.flush()
-        if not cache_db.is_closed():
-            cache_db.close()
+        if not self.db.is_closed():
+            self.db.close()
 
     # Aliases for smooth migration
     def get_hash(self, arc_path: str, size: int, mtime: int) -> Optional[str]:

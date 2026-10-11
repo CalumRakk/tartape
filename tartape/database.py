@@ -72,7 +72,13 @@ class DatabaseSession:
             self._depth += 1
             return self.db
         except (peewee.DatabaseError, sqlite3.DatabaseError) as e:
-            from tartape.exceptions import TapeCorruptedError
+            from tartape.exceptions import ReadOnlyCatalogError, TapeCorruptedError
+
+            msg = str(e).lower()
+            if "readonly" in msg or "read-only" in msg:
+                raise ReadOnlyCatalogError(
+                    f"Cannot modify read-only catalog at '{self.db_path}': {e}"
+                ) from e
 
             raise TapeCorruptedError(
                 f"Corrupted or invalid database at '{self.db_path}': {e}"
@@ -86,7 +92,13 @@ class DatabaseSession:
         if exc_type and issubclass(
             exc_type, (peewee.DatabaseError, sqlite3.DatabaseError)
         ):
-            from tartape.exceptions import TapeCorruptedError
+            from tartape.exceptions import ReadOnlyCatalogError, TapeCorruptedError
+
+            msg = str(exc_val).lower()
+            if "readonly" in msg or "read-only" in msg:
+                raise ReadOnlyCatalogError(
+                    f"Cannot modify read-only catalog at '{self.db_path}': {exc_val}"
+                ) from exc_val
 
             raise TapeCorruptedError(
                 f"Database error at '{self.db_path}': {exc_val}"

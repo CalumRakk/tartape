@@ -513,7 +513,8 @@ class Volume(io.BufferedIOBase):
             total_tape_size=self.manifest.total_size,
             checksum_algorithm=self.checksum_algorithm,
         )
-        self._stream_gen = engine.stream(start_offset=global_target)
+        # Consume raw byte chunks directly (bypassing event wrappers)
+        self._stream_gen = engine.stream_bytes(start_offset=global_target)
 
     def _persist_checksum(self, checksum_val: str) -> None:
         """Safely persist calculated checksum to the catalog database."""
@@ -636,22 +637,23 @@ class Volume(io.BufferedIOBase):
             self.directory,
             total_tape_size=self.manifest.total_size,
         )
-        stream = engine.stream(start_offset=self.start_offset)
+        # Use stream_bytes to avoid dataclass allocations during hashing
+        stream = engine.stream_bytes(start_offset=self.start_offset)
 
         bytes_hashed = 0
-        for event in stream:
+        for chunk in stream:
             if bytes_hashed >= self.size:
                 break
 
-            if event.type == "file_data":
-                data = event.data
-                remaining_in_volume = self.size - bytes_hashed
+            remaining_in_volume = self.size - bytes_hashed
+            data = (
+                chunk[:remaining_in_volume]
+                if len(chunk) > remaining_in_volume
+                else chunk
+            )
 
-                if len(data) > remaining_in_volume:
-                    data = data[:remaining_in_volume]
-
-                hasher.update(data)
-                bytes_hashed += len(data)
+            hasher.update(data)
+            bytes_hashed += len(data)
 
         digest = hasher.hexdigest()
         self._final_checksum = digest
@@ -703,9 +705,9 @@ class Volume(io.BufferedIOBase):
             try:
                 if not self._stream_gen:
                     raise RuntimeError("Tape stream generator not initialized.")
-                event = next(self._stream_gen)
-                if event.type == "file_data":
-                    self._buffer.extend(event.data)
+                # Pull raw bytes chunk directly from generator
+                chunk = next(self._stream_gen)
+                self._buffer.extend(chunk)
             except StopIteration:
                 if self._stream_gen:
                     self._stream_gen.close()

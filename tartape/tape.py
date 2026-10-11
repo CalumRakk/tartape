@@ -25,6 +25,7 @@ from tartape.models import Track
 from tartape.schemas import (
     ByteWindow,
     Discrepancy,
+    FileGPS,
     FileSlice,
     ManifestEntry,
     TarEvent,
@@ -59,6 +60,21 @@ class Tape(os.PathLike):
         self._catalog_instance: Optional[Catalog] = None
         self._refresh_metadata()
 
+    def locate(self, arc_path: str, tag_or_size: Optional[str | int] = None) -> FileGPS:
+        """Query surgical GPS location and slice coordinates for a file.
+
+        Args:
+            arc_path: The archive path of the file to locate.
+            tag_or_size: Optional layout tag or volume size (e.g. '1GB', 1073741824).
+                If None, uses the default or monolithic layout.
+
+        Returns:
+            FileGPS: The coordinates, fragment slices, and precomputed HTTP range headers.
+        """
+        cat = self._get_catalog()
+        with cat:
+            return cat.locate(arc_path, tag_or_size=tag_or_size)
+
     def _refresh_metadata(self):
         cat = self._get_catalog()
         with cat:
@@ -84,6 +100,9 @@ class Tape(os.PathLike):
             self._catalog_instance = None
 
     def __enter__(self):
+        # Keep the catalog database session open during the Tape context
+        cat = self._get_catalog()
+        cat.open()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -167,6 +186,7 @@ class Tape(os.PathLike):
 
     def destroy(self):
         """Remove metadata artifacts (sidecar or legacy directory)."""
+        self.close()
         metadata_dir = self.directory / TAPE_METADATA_DIR
         if metadata_dir.exists():
             shutil.rmtree(metadata_dir)
@@ -386,10 +406,9 @@ class Tape(os.PathLike):
             if start_offset > 0:
                 self._verify_resume_point_integrity(cat, start_offset)
 
-            tracks = list(cat.query_tracks_intersecting_range(start_offset))
-
+            # Lazy generator to maintain O(1) memory footprint for large datasets
             def track_loader():
-                for track in tracks:
+                for track in cat.query_tracks_intersecting_range(start_offset):
                     yield ManifestEntry.from_track(track, tape_window)
 
             engine = TarStreamGenerator(

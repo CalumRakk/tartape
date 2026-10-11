@@ -25,40 +25,154 @@ class Layout:
     """Represents a specific partitioning layout (slicing scheme) for a tape.
 
     Enables surgical GPS lookups and volume verification without requiring
-    source files on disk.
+    source files on disk. Can be backed by a persistent database record or
+    computed virtually on-the-fly.
     """
 
-    def __init__(self, record: LayoutRecord, session: DatabaseSession):
-        self._record = record
+    def __init__(
+        self,
+        session: DatabaseSession,
+        volume_size: int,
+        tag: str,
+        total_volumes: int,
+        total_tape_size: int,
+        record: Optional[LayoutRecord] = None,
+        created_at: int = 0,
+        is_default: bool = False,
+    ):
         self._session = session
-        self.tag = record.tag
-        self.volume_size = record.volume_size
-        self.total_volumes = record.total_volumes
-        self.created_at = record.created_at
-        self.is_default = record.is_default
+        self._record = record
+        self.tag = tag
+        self.volume_size = volume_size
+        self.total_volumes = total_volumes
+        self.total_tape_size = total_tape_size
+        self.created_at = created_at
+        self.is_default = is_default
+
+    @property
+    def is_virtual(self) -> bool:
+        """True if this layout is calculated dynamically without a persistent DB record."""
+        return self._record is None
+
+    @classmethod
+    def from_record(
+        cls,
+        record: LayoutRecord,
+        session: DatabaseSession,
+        total_tape_size: int,
+    ) -> "Layout":
+        return cls(
+            session=session,
+            volume_size=record.volume_size,
+            tag=record.tag,
+            total_volumes=record.total_volumes,
+            total_tape_size=total_tape_size,
+            record=record,
+            created_at=record.created_at,
+            is_default=record.is_default,
+        )
+
+    @classmethod
+    def virtual(
+        cls,
+        volume_size: int,
+        total_tape_size: int,
+        session: DatabaseSession,
+        tag: Optional[str] = None,
+    ) -> "Layout":
+        from tartape.chunker import calculate_segments
+
+        segments = list(calculate_segments(total_tape_size, volume_size))
+        total_vols = max(1, len(segments))
+        layout_tag = tag or format_size(volume_size)
+        return cls(
+            session=session,
+            volume_size=volume_size,
+            tag=layout_tag,
+            total_volumes=total_vols,
+            total_tape_size=total_tape_size,
+            record=None,
+            created_at=0,
+            is_default=False,
+        )
 
     @property
     def volumes(self) -> list[VolumeRecord]:
         """Return all VolumeRecords belonging to this layout ordered by index."""
-        with self._session:
-            return list(
-                VolumeRecord.select()
-                .where(VolumeRecord.layout_tag == self.tag)
-                .order_by(VolumeRecord.volume_index)
+        if self._record is not None:
+            with self._session:
+                return list(
+                    VolumeRecord.select()
+                    .where(VolumeRecord.layout_tag == self.tag)
+                    .order_by(VolumeRecord.volume_index)
+                )
+
+        # Transient synthesis for virtual layouts
+        from tartape.chunker import calculate_segments
+
+        template = "{name}_{fingerprint:.8}.tar.{pindex}"
+        padding_width = max(3, len(str(self.total_volumes)))
+        segments = list(calculate_segments(self.total_tape_size, self.volume_size))
+
+        records = []
+        for idx, (v_start, v_end) in enumerate(segments):
+            pindex = str(idx + 1).zfill(padding_width)
+            vol_name = template.format(
+                name="virtual",
+                fingerprint="adhoc",
+                index=idx,
+                pindex=pindex,
+                part=idx + 1,
+                total=self.total_volumes,
             )
+            records.append(
+                VolumeRecord(
+                    layout_tag=self.tag,
+                    volume_index=idx,
+                    name=vol_name,
+                    start_offset=v_start,
+                    end_offset=v_end,
+                    size=v_end - v_start,
+                    checksum=None,
+                    checksum_algorithm=None,
+                )
+            )
+        return records
 
     def get_volume(self, volume_index: int) -> VolumeRecord:
         """Retrieve a specific volume record by its sequence index."""
-        with self._session:
-            try:
-                return VolumeRecord.get(
-                    (VolumeRecord.layout_tag == self.tag)
-                    & (VolumeRecord.volume_index == volume_index)
-                )
-            except VolumeRecord.DoesNotExist:  # type: ignore
-                raise VolumeNotFoundError(
-                    f"Volume index {volume_index} does not exist in layout '{self.tag}'"
-                )
+        if self._record is not None:
+            with self._session:
+                try:
+                    return VolumeRecord.get(
+                        (VolumeRecord.layout_tag == self.tag)
+                        & (VolumeRecord.volume_index == volume_index)
+                    )
+                except VolumeRecord.DoesNotExist:  # type: ignore
+                    raise VolumeNotFoundError(
+                        f"Volume index {volume_index} does not exist in layout '{self.tag}'"
+                    )
+
+        if volume_index < 0 or volume_index >= self.total_volumes:
+            raise VolumeNotFoundError(
+                f"Volume index {volume_index} out of bounds for virtual layout '{self.tag}'"
+            )
+
+        v_start = volume_index * self.volume_size
+        v_end = min(self.total_tape_size, v_start + self.volume_size)
+        padding_width = max(3, len(str(self.total_volumes)))
+        pindex = str(volume_index + 1).zfill(padding_width)
+
+        return VolumeRecord(
+            layout_tag=self.tag,
+            volume_index=volume_index,
+            name=f"virtual_part_{pindex}.tar",
+            start_offset=v_start,
+            end_offset=v_end,
+            size=v_end - v_start,
+            checksum=None,
+            checksum_algorithm=None,
+        )
 
     def locate(self, arc_path: str) -> FileGPS:
         """Compute the exact GPS coordinates and slices for a file within this layout.
@@ -250,24 +364,39 @@ class Catalog:
         """Return all registered partitioning layouts."""
         with self.db_session:
             records = list(LayoutRecord.select().order_by(LayoutRecord.created_at))
-            return [Layout(rec, self.db_session) for rec in records]
+            return [
+                Layout.from_record(
+                    rec, self.db_session, total_tape_size=self.total_size
+                )
+                for rec in records
+            ]
 
     @property
     def default_layout(self) -> Layout:
-        """Return the default layout, or the sole layout if only one exists."""
+        """Return the default layout, or the sole layout, or a virtual monolithic layout."""
         with self.db_session:
             records = list(LayoutRecord.select())
             if not records:
-                raise LayoutNotFoundError(
-                    "No layouts have been registered in this catalog."
+                # Monolithic fallback: treats the entire continuous stream as Volume 0
+                return Layout.virtual(
+                    volume_size=max(TAR_BLOCK_SIZE, self.total_size),
+                    total_tape_size=self.total_size,
+                    session=self.db_session,
+                    tag="monolithic",
                 )
 
             if len(records) == 1:
-                return Layout(records[0], self.db_session)
+                return Layout.from_record(
+                    records[0], self.db_session, total_tape_size=self.total_size
+                )
 
             default_record = next((r for r in records if r.is_default), None)
             if default_record is not None:
-                return Layout(default_record, self.db_session)
+                return Layout.from_record(
+                    default_record,
+                    self.db_session,
+                    total_tape_size=self.total_size,
+                )
 
             raise AmbiguousLayoutError(
                 f"Multiple layouts exist ({[r.tag for r in records]}) and none is marked as default. "
@@ -275,39 +404,59 @@ class Catalog:
             )
 
     def get_layout(self, tag_or_size: str | int) -> Layout:
-        """Retrieve a specific layout by its tag name or volume size."""
+        """Retrieve a specific layout by its tag name or volume size.
+
+        If not found in the catalog database but parsable as a valid size,
+        returns an on-the-fly virtual Layout without modifying SQLite.
+        """
         with self.db_session:
-            # Look up by integer byte size
+            # 1. Look up by integer byte size in database
             if isinstance(tag_or_size, int):
                 try:
                     record = LayoutRecord.get(LayoutRecord.volume_size == tag_or_size)
-                    return Layout(record, self.db_session)
-                except LayoutRecord.DoesNotExist:  # type: ignore
-                    raise LayoutNotFoundError(
-                        f"Layout with size {tag_or_size} bytes not found in catalog."
+                    return Layout.from_record(
+                        record, self.db_session, total_tape_size=self.total_size
                     )
+                except LayoutRecord.DoesNotExist:  # type: ignore
+                    pass
 
-            # Direct match on tag (e.g., '1GB', 'custom_part')
+            # 2. Direct match on tag string (e.g., '1GB', 'custom_part')
             try:
                 record = LayoutRecord.get(LayoutRecord.tag == str(tag_or_size))
-                return Layout(record, self.db_session)
+                return Layout.from_record(
+                    record, self.db_session, total_tape_size=self.total_size
+                )
             except LayoutRecord.DoesNotExist:  # type: ignore
                 pass
 
-            # Try parsing tag_or_size as a human size string (e.g., '1gb' -> 1073741824)
+            # 3. Try parsing as size and look up matching volume_size in database
+            parsed_bytes: Optional[int] = None
             try:
                 parsed_bytes = parse_size(tag_or_size)
                 record = LayoutRecord.get(LayoutRecord.volume_size == parsed_bytes)
-                return Layout(record, self.db_session)
+                return Layout.from_record(
+                    record, self.db_session, total_tape_size=self.total_size
+                )
             except (ValueError, TypeError, LayoutRecord.DoesNotExist):  # type: ignore
                 pass
 
-            # Backwards compatibility with legacy 'vol_{parsed_bytes}' or 'vol_{tag_or_size}'
+            # 4. Backwards compatibility with legacy 'vol_{parsed_bytes}' or 'vol_{tag_or_size}'
             try:
                 record = LayoutRecord.get(LayoutRecord.tag == f"vol_{tag_or_size}")
-                return Layout(record, self.db_session)
+                return Layout.from_record(
+                    record, self.db_session, total_tape_size=self.total_size
+                )
             except LayoutRecord.DoesNotExist:  # type: ignore
                 pass
+
+            # 5. Virtual Layout Fallback: If it's a valid size, construct dynamically!
+            if parsed_bytes is not None:
+                return Layout.virtual(
+                    volume_size=parsed_bytes,
+                    total_tape_size=self.total_size,
+                    session=self.db_session,
+                    tag=format_size(parsed_bytes),
+                )
 
             raise LayoutNotFoundError(f"Layout '{tag_or_size}' not found in catalog.")
 
@@ -378,7 +527,9 @@ class Catalog:
 
             VolumeRecord.insert_many(volume_records).on_conflict_replace().execute()
 
-        return Layout(layout_rec, self.db_session)
+        return Layout.from_record(
+            layout_rec, self.db_session, total_tape_size=total_size
+        )
 
     # Convenience Shortcuts
 
@@ -415,17 +566,20 @@ class Catalog:
             )
 
     def open(self):
+        """Explicitly open the catalog database session."""
         self.db_session.connect()
         return self
 
     def close(self):
+        """Forcefully close the catalog database session and perform cleanup."""
         self.db_session.close()
 
     def __enter__(self):
-        return self.open()
+        self.db_session.__enter__()
+        return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
+        return self.db_session.__exit__(exc_type, exc_val, exc_tb)
 
     @classmethod
     def from_directory(cls, directory: str | Path) -> "Catalog":

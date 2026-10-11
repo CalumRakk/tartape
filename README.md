@@ -16,38 +16,47 @@ TarTape solves these issues by turning any directory into a predictable, resumab
 
 ---
 
-## The Mental Model: Tape vs. Volumes
+## The Mental Model: Catalog, Tape, and Volumes
 
-To get the most out of TarTape, it helps to understand two simple concepts:
+To get the most out of TarTape, it helps to understand its three core concepts:
 
-* **Tape:** The complete virtual archive for your directory. It behaves as one continuous stream of bytes from start to finish.
-* **Volume:** A virtual slice or window of that exact tape (for example, divided into 2 GB chunks). It does not create files on your disk or alter your data. Each volume behaves like an independent open file with its own name and checksum, ready for cloud multipart uploads.
+* **Catalog (`.tartape`):** The **Blueprint & Map**. A lightweight sidecar database containing the deterministic file inventory, byte offsets, and cryptographic signatures. It operates in **Zero-Disk mode**—it can be inspected, queried, and verified on any machine without needing the original files.
+* **Tape:** The **Streaming Engine**. Tied to your local directory on disk and its catalog. It materializes the archive on-the-fly as a continuous, resumable virtual byte stream without intermediate disk files.
+* **Volume:** The **Independent Slice**. A deterministic window of the tape (e.g., divided into 1 GB chunks) designed for cloud multipart uploads. Each volume behaves like a separate open file with its own name and non-blocking in-flight checksum.
 
 ```text
-  Your Directory on Disk (e.g., 5 GB)
-  └── folder/
-      ├── data.csv (3 GB)
-      └── images/ ...
-            │
-            ▼ tartape.record()
-  ┌─────────────────────────────────────────────────────────────────┐
-  │  TAPE: The Complete Virtual Archive (5 GB continuous stream)    │
-  │  [TAR Header] [ data.csv bytes... ] [TAR Header] [ images... ]  │
-  └─────────────────────────────────────────────────────────────────┘
+               Your Directory on Disk (e.g., 5 GB)
+               └── dataset/
                      │
-                     │ tape.iter_volumes(size="2GB")
-                     ▼
-  ┌───────────────────┐  ┌───────────────────┐  ┌───────────────────┐
-  │     VOLUME 0      │  │     VOLUME 1      │  │     VOLUME 2      │
-  │   (Bytes 0 - 2GB) │  │  (Bytes 2GB - 4GB)│  │  (Bytes 4GB - 5GB)│
-  │  backup.tar.001   │  │  backup.tar.002   │  │  backup.tar.003   │
-  │  MD5: 9a3f...     │  │  MD5: c4b1...     │  │  MD5: 71ea...     │
-  └───────────────────┘  └───────────────────┘  └───────────────────┘
-            │                      │                      │
-            └──────────────┬──────────────────────────────┘
-                           ▼
-     Uploaded to S3 / Cloud Storage as Multipart Parts
-     (concatenating these parts gives you the original, valid TAR)
+                     ▼ tartape.record()
+       ┌──────────────────────────────────────────────────┐
+       │ CATALOG (dataset.tartape)                        │
+       │ Zero-Disk sidecar index: file inventory,         │
+       │ global offsets, hashes, and slicing schemes.     │
+       └───────────────┬──────────────────┬───────────────┘
+                       │                  │
+        STREAMING PATH │                  │ OFFLINE GPS PATH
+        (Needs source  │                  │ (Index only, zero disk)
+         files on disk)│                  │
+                       ▼                  ▼
+        ┌─────────────────────────┐  ┌─────────────────────────┐
+        │ TAPE: Continuous Stream │  │ catalog.locate(file)    │
+        │ [Header][Data][Padding] │  │ Coordinates & HTTP      │
+        └──────────────┬──────────┘  │ Range headers for       │
+                       │             │ surgical downloads      │
+        tape.iter_volumes("2GB")     └─────────────────────────┘
+                       │
+       ┌───────────────┴───────────────┐
+       ▼                               ▼
+┌──────────────┐                ┌──────────────┐
+│   VOLUME 0   │                │   VOLUME 1   │
+│ (Bytes 0-2GB)│                │ (Bytes 2-4GB)│
+│ backup.tar.1 │                │ backup.tar.2 │
+└──────────────┘                └──────────────┘
+       │                               │
+       └───────────────┬───────────────┘
+                       ▼
+          Uploaded to AWS S3 / Azure
 ```
 
 ---
@@ -198,33 +207,41 @@ with tartape.open("./my_dataset") as tape:
 
 ---
 
-### 5. Finding and Downloading a Single File (Without Downloading Everything)
-If you uploaded a 20 GB backup in several 1 GB parts to cloud storage, you don't need to download all 20 GB to retrieve one file. You can check the index to find the exact part and byte position of that file, and download only those bytes using an HTTP Range request:
+### 5. Surgical Single-File Recovery via HTTP Range (Without Full Downloads)
+
+Imagine you uploaded a 50 GB dataset in 1 GB parts to S3 (as shown in **Example 2**). Months later, on a remote server or Lambda function, you only need to retrieve a single report (`annual_2024.pdf`).
+
+You **do not need the original 50 GB dataset** or a local copy of the archive. You only need the lightweight `.tartape` index file to calculate the exact HTTP Range headers and download only that file:
 
 ```python
 import requests
 import tartape
 
-# Open the index file (source files don't need to be present)
-catalog = tartape.open_catalog("./my_dataset.tartape")
+# Open index in offline zero-disk mode (read-only safe)
+catalog = tartape.open_catalog("./my_dataset.tartape", read_only=True)
 
-# Locate the file across the volumes automatically
-location = catalog.locate("my_dataset/reports/annual_2024.pdf")
+# Locate the file within the 1 GB slicing scheme used during upload
+# (Works even if the layout was never explicitly saved in the DB!)
+location = catalog.locate("my_dataset/reports/annual_2024.pdf", tag_or_size="1GB")
 
-print(f"File size: {location.file_size} bytes")
+print(f"File size: {location.file_size:,} bytes")
+print(f"Spans across {len(location.fragments)} cloud volume(s)")
 
-# Download only the specific bytes of this file from cloud storage
+# Download only the exact bytes from the cloud
 for fragment in location.fragments:
-    part_url = f"https://storage.example.com/backups/part_{fragment.volume_index}.tar"
+    part_url = (
+        f"https://my-bucket.s3.amazonaws.com/backups/part_{fragment.volume_index}.tar"
+    )
 
-    # 'fragment.range_header' is precalculated, avoiding off-by-one HTTP math
-    res = requests.get(part_url, headers=fragment.range_header)
+    # 'fragment.range_header' provides precomputed headers, e.g.:
+    # {'Range': 'bytes=1048576-2097151'}
+    response = requests.get(part_url, headers=fragment.range_header)
 
     with open("restored_annual_2024.pdf", "ab") as f:
-        f.write(res.content)
+        f.write(response.content)
 
-# Tip: If you defined multiple split schemes (e.g., '500MB' and '1GB'),
-# you can specify which one to query: catalog.locate(..., tag_or_size="1GB")
+# Note: If your archive was uploaded as a single monolithic TAR file,
+# simply omit the size parameter: catalog.locate("my_dataset/reports/annual_2024.pdf")
 ```
 
 ---
@@ -351,14 +368,16 @@ tape = tartape.record("./my_dataset", auto_truncate=True)
 
 ## API Summary
 
-| Function / Method | What it does |
-|:---|:---|
-| `tartape.record(path, ...)` | Scans a folder and creates its index file. Returns an active `Tape`. |
-| `tartape.open(path)` | Opens an already-indexed folder for streaming. |
-| `tartape.open_catalog(path)` | Opens only the index file (no source files needed) to inspect contents or look up file locations. |
-| `tape.as_file()` | Returns a standard file-like object with `read()` and `seek()` to stream the archive. |
-| `tape.play(start_offset=0)` | Yields raw chunks of bytes directly, with optional byte-accurate resumption. |
-| `tape.iter_volumes(size="1GB")` | Yields the archive split into file-like chunks (accepts `"100MB"`, `"1GB"`, `"2GB"`, etc.). |
-| `tape.get_volume(index, size="1GB")` | Retrieves a specific volume directly without iterating through previous parts. |
-| `tape.verify(deep=True)` | Checks if local files on disk match the recorded index. |
-| `catalog.locate(arc_path)` | Returns coordinates and precalculated `range_header` for each file fragment. |
+| Function / Method | Mode | What it does |
+|:---|:---:|:---|
+| `tartape.record(path, ...)` | Write | Scans a folder, creates its `.tartape` sidecar catalog, and returns an active `Tape`. |
+| `tartape.open(path)` | Streaming | Opens an already-indexed folder for streaming. Keeps DB session open inside context manager. |
+| `tartape.open_catalog(path, read_only=False)` | Zero-Disk | Opens only the index file (no source files needed) to inspect contents, layouts, or run GPS queries. |
+| `tape.as_file(buffer_size=64KB)` | Streaming | Returns a standard file-like object with `read()` and `seek()` to stream the archive. |
+| `tape.play(start_offset=0)` | Streaming | Yields raw byte chunks directly with byte-accurate resumption. |
+| `tape.iter_volumes(size="1GB")` | Streaming | Yields the archive split into file-like slices (`Volume`) for cloud multipart uploads. |
+| `tape.get_volume(index, size="1GB")` | Streaming | Retrieves a specific volume directly without iterating through previous parts. |
+| `tape.verify(deep=True)` | Integrity | Checks if local files match the T0 inventory snapshot (supports `<15ms` Canary checks). |
+| `tape.locate(arc_path, ...)` | Zero-Disk | Shortcut to locate a file's GPS coordinates using the tape's catalog. |
+| `catalog.locate(arc_path, tag_or_size=None)` | Zero-Disk | Returns GPS coordinates and precalculated `range_header` using a monolithic or ad-hoc virtual layout. |
+| `volume.compute_checksum(algorithm=None)` | Streaming | Deliberately reads from disk to calculate the volume checksum upfront. |
