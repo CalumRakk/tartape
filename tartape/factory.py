@@ -5,10 +5,19 @@ import stat as stat_module
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 
-from tartape.constants import DEFAULT_EXCLUDES, TAPE_METADATA_DIR
+from tartape.constants import (
+    DEFAULT_EXCLUDES,
+    SUPPORTED_CHECKSUM_ALGORITHMS,
+    TAPE_METADATA_DIR,
+)
 from tartape.exceptions import PathConstraintError, TarIntegrityError
 from tartape.models import Track
-from tartape.schemas import Discrepancy, DiskEntryStats, EntryMetadata
+from tartape.schemas import (
+    ChecksumAlgorithm,
+    Discrepancy,
+    DiskEntryStats,
+    EntryMetadata,
+)
 
 if TYPE_CHECKING:
     from tartape.cache import HashCacheManager
@@ -395,7 +404,9 @@ class TarEntryFactory:
         return resolved
 
     @staticmethod
-    def calculate_checksum(path: Path, algorithm: str = "sha256") -> str:
+    def calculate_checksum(
+        path: Path, algorithm: ChecksumAlgorithm | str = "sha256"
+    ) -> str:
         """Calculate the cryptographic checksum of a file in 64 KB blocks."""
         try:
             hasher = hashlib.new(algorithm)
@@ -459,7 +470,7 @@ class TarEntryFactory:
         rel_path: str,
         arcname: str,
         anonymize: bool = True,
-        checksum_algorithm: Optional[str] = None,
+        checksum_algorithm: Optional[ChecksumAlgorithm | str] = None,
         precomputed_stat: Optional[os.stat_result] = None,
         cache_manager: Optional["HashCacheManager"] = None,
     ) -> Optional[EntryMetadata]:

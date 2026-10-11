@@ -28,6 +28,8 @@ from tartape.exceptions import (
 from tartape.factory import ExcludeType
 from tartape.recorder import TapeRecorder
 from tartape.schemas import (
+    ChecksumAlgorithm,
+    ChecksumOption,
     Discrepancy,
     FileGPS,
     FileSlice,
@@ -46,7 +48,7 @@ def record(
     catalog_path: Optional[str | Path] = None,
     exclude: Optional[ExcludeType] = None,
     anonymize: bool = True,
-    checksum: str | bool = False,
+    checksum: ChecksumOption = False,
     overwrite: bool = False,
     auto_truncate: bool = False,
 ) -> Tape:
@@ -61,8 +63,8 @@ def record(
             `<directory.parent>/<directory.name>.tartape`.
         exclude: Patterns or callable to skip specific files or directories.
         anonymize: If True, scrubs UID/GID and sets ownership to 'root'.
-        checksum: False to skip file hashing; True for default ('sha256'); or an
-            algorithm name ('sha256', 'md5', etc.).
+        checksum: False to skip file hashing; True for default ('sha256'); or a
+            supported algorithm name ('sha256', 'md5', 'sha1', 'sha512').
         overwrite: If True, replaces existing catalog file at destination.
         auto_truncate: If True, automatically shortens components exceeding 100 bytes.
 
@@ -158,6 +160,8 @@ create = record
 __all__ = [
     "AmbiguousLayoutError",
     "Catalog",
+    "ChecksumAlgorithm",
+    "ChecksumOption",
     "Discrepancy",
     "FileGPS",
     "FileSlice",

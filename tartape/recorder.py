@@ -11,6 +11,7 @@ from typing import Iterable, Optional, cast
 from tartape.cache import HashCacheManager
 from tartape.constants import (
     DEFAULT_EXCLUDES,
+    SUPPORTED_CHECKSUM_ALGORITHMS,
     TAPE_EXTENSION,
     TAR_FOOTER_SIZE,
 )
@@ -18,7 +19,7 @@ from tartape.database import DatabaseSession, seal_database
 from tartape.exceptions import PathConstraintError, PathConstraintReportError
 from tartape.factory import ExcludeType, TarEntryFactory, should_exclude
 from tartape.models import TapeMetadata, Track
-from tartape.schemas import EntryMetadata
+from tartape.schemas import ChecksumAlgorithm, ChecksumOption, EntryMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,7 @@ class TapeRecorder:
         catalog_path: Optional[str | Path] = None,
         exclude: Optional[ExcludeType] = None,
         anonymize: bool = True,
-        checksum: str | bool = False,
+        checksum: ChecksumOption = False,
         overwrite: bool = False,
         auto_truncate: bool = False,
     ):
@@ -64,11 +65,22 @@ class TapeRecorder:
 
         self.exclude = DEFAULT_EXCLUDES if exclude is None else exclude
 
-        # Normalize unified checksum parameter
+        # Normalize and validate unified checksum parameter
         if isinstance(checksum, bool):
-            self.checksum_algorithm: Optional[str] = "sha256" if checksum else None
+            self.checksum_algorithm: Optional[ChecksumAlgorithm] = (
+                "sha256" if checksum else None
+            )
         elif isinstance(checksum, str):
-            self.checksum_algorithm = checksum.lower().strip()
+            algo = checksum.lower().strip()
+            if algo not in SUPPORTED_CHECKSUM_ALGORITHMS:
+                valid_options = ", ".join(
+                    f"'{a}'" for a in SUPPORTED_CHECKSUM_ALGORITHMS
+                )
+                raise ValueError(
+                    f"Unsupported checksum algorithm '{checksum}'. "
+                    f"Supported algorithms: {valid_options}."
+                )
+            self.checksum_algorithm = cast(ChecksumAlgorithm, algo)
         else:
             self.checksum_algorithm = None
 

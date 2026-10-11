@@ -8,6 +8,10 @@ from tartape.constants import TAR_BLOCK_SIZE
 if TYPE_CHECKING:
     from tartape.models import Track
 
+# Checksum typing definitions
+ChecksumAlgorithm = Literal["sha256", "md5", "sha1", "sha512"]
+ChecksumOption = ChecksumAlgorithm | bool
+
 
 class EntryState(str, Enum):
     """The state of a file in a volume."""

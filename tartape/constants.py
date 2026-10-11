@@ -9,6 +9,9 @@ TAPE_EXTENSION = ".tartape"
 TAPE_METADATA_DIR = ".tartape"
 TAPE_DB_NAME = "index.db"
 
+# Supported cryptographic and integrity checksum algorithms
+SUPPORTED_CHECKSUM_ALGORITHMS: tuple[str, ...] = ("sha256", "md5", "sha1", "sha512")
+
 DEFAULT_EXCLUDES = [
     ".DS_Store",
     "Thumbs.db",

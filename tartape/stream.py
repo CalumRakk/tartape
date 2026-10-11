@@ -16,8 +16,14 @@ from tartape.exceptions import (
 from tartape.factory import validate_integrity
 from tartape.header import TarHeader
 
-from .constants import CHUNK_SIZE_DEFAULT, TAR_BLOCK_SIZE, TAR_FOOTER_SIZE
+from .constants import (
+    CHUNK_SIZE_DEFAULT,
+    SUPPORTED_CHECKSUM_ALGORITHMS,
+    TAR_BLOCK_SIZE,
+    TAR_FOOTER_SIZE,
+)
 from .schemas import (
+    ChecksumAlgorithm,
     FileEndMetadata,
     FileStartMetadata,
     ManifestEntry,
@@ -599,11 +605,14 @@ class Volume(io.BufferedIOBase):
         """Legacy compatibility alias for checksum."""
         return self.checksum
 
-    def compute_checksum(self, algorithm: Optional[str] = None) -> str:
+    def compute_checksum(
+        self, algorithm: Optional[ChecksumAlgorithm | str] = None
+    ) -> str:
         """Deliberately compute the volume checksum by reading from source files on disk.
 
         Raises:
             SourceNotFoundError: If source files are not accessible on disk.
+            ValueError: If an unsupported checksum algorithm is specified.
         """
         if not self.directory.exists() or not self.directory.is_dir():
             raise SourceNotFoundError(
@@ -611,6 +620,12 @@ class Volume(io.BufferedIOBase):
             )
 
         algo = (algorithm or self.checksum_algorithm or "sha256").lower()
+        if algo not in SUPPORTED_CHECKSUM_ALGORITHMS:
+            valid_options = ", ".join(f"'{a}'" for a in SUPPORTED_CHECKSUM_ALGORITHMS)
+            raise ValueError(
+                f"Unsupported checksum algorithm '{algo}'. Supported algorithms: {valid_options}."
+            )
+
         try:
             hasher = hashlib.new(algo)
         except ValueError:

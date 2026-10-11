@@ -50,12 +50,12 @@ class TestFolderVolumeStress(TarTapeTestCase):
         The volume must return None for .checksum and require explicit compute_checksum().
         """
         vol_size = 4096
-        volume = list(self.tape.iter_volumes(size=vol_size))[0]
+        volume = next(iter(self.tape.iter_volumes(size=vol_size)))
 
         with volume:
-            part1 = volume.read(100)
+            _ = volume.read(100)
             volume.seek(500)
-            part2 = volume.read(100)
+            _ = volume.read(100)
 
             self.assertTrue(volume._integrity_broken)
 
@@ -108,7 +108,7 @@ class TestFolderVolumeStress(TarTapeTestCase):
     def test_seek_out_of_bounds_protection(self):
         """Ensures the volume protects against illegal seek operations."""
         vol_size = 512
-        volume = list(self.tape.iter_volumes(size=vol_size))[0]
+        volume = next(iter(self.tape.iter_volumes(size=vol_size)))
 
         with volume:
             with self.assertRaises(ValueError):
