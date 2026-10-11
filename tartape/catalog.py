@@ -105,24 +105,29 @@ class Layout:
             )
 
     def verify_volume(self, volume_index: int, file_path: str | Path) -> bool:
-        """Verify a downloaded physical volume file against its recorded MD5 checksum."""
+        """Verify a downloaded physical volume file against its recorded checksum."""
         path = Path(file_path)
         if not path.is_file():
             return False
 
         vol_record = self.get_volume(volume_index)
-        if not vol_record.md5sum:
+        if not vol_record.checksum:
             logger.warning(
-                f"No MD5 hash recorded for volume {volume_index} in layout '{self.tag}'"
+                f"No checksum recorded for volume {volume_index} in layout '{self.tag}'"
             )
             return False
 
-        hasher = hashlib.md5()
+        algo = vol_record.checksum_algorithm or "sha256"
+        try:
+            hasher = hashlib.new(algo)
+        except ValueError:
+            hasher = hashlib.new(algo, usedforsecurity=False)
+
         with open(path, "rb") as f:
             for chunk in iter(lambda: f.read(64 * 1024), b""):
                 hasher.update(chunk)
 
-        return hasher.hexdigest() == vol_record.md5sum
+        return hasher.hexdigest() == vol_record.checksum
 
 
 class Catalog:
@@ -131,17 +136,17 @@ class Catalog:
     Operates completely decoupled from the original source files.
     """
 
-    def __init__(self, db_path: str | Path):
+    def __init__(self, db_path: str | Path, read_only: bool = False):
         if str(db_path) == ":memory:":
             self.path = Path(":memory:")
-            self.db_session = DatabaseSession(":memory:")
+            self.db_session = DatabaseSession(":memory:", read_only=read_only)
             self._stats_cache: Optional[dict] = None
         else:
             self.path = Path(db_path).resolve()
             if not self.path.exists() or not self.path.is_file():
                 raise TapeNotFoundError(f"TarTape catalog not found at: {self.path}")
 
-            self.db_session = DatabaseSession(self.path)
+            self.db_session = DatabaseSession(self.path, read_only=read_only)
             self._stats_cache: Optional[dict] = None
 
     def _load_metadata(self) -> dict:
@@ -155,6 +160,11 @@ class Catalog:
                         "total_size": int(raw.get("total_size", 0)),
                         "created_at": int(raw.get("created_at", 0)),
                         "exclude_patterns": raw.get("exclude_patterns", "[]"),
+                        "checksum_algorithm": raw.get("checksum_algorithm", "none"),
+                        "has_file_checksums": raw.get("has_file_checksums", "false"),
+                        "data_size": int(raw.get("data_size", 0)),
+                        "auto_truncated": raw.get("auto_truncated", "false"),
+                        "is_anonymized": raw.get("is_anonymized", "false"),
                     }
             except Exception as e:
                 from tartape.exceptions import TapeCorruptedError
@@ -163,6 +173,37 @@ class Catalog:
                     f"Failed to read catalog metadata from {self.path}: {e}"
                 ) from e
         return self._stats_cache
+
+    @property
+    def checksum_algorithm(self) -> Optional[str]:
+        """Return the checksum algorithm used for files in this tape, or None."""
+        algo = self._load_metadata().get("checksum_algorithm")
+        return algo if algo and algo != "none" else None
+
+    @property
+    def has_file_checksums(self) -> bool:
+        """True if individual files were checksummed at T0."""
+        return self._load_metadata().get("has_file_checksums") == "true"
+
+    @property
+    def data_size(self) -> int:
+        """Total uncompressed payload size in bytes."""
+        return int(self._load_metadata().get("data_size", 0))
+
+    @property
+    def overhead_size(self) -> int:
+        """TAR container overhead size in bytes."""
+        return max(0, self.total_size - self.data_size)
+
+    @property
+    def auto_truncated(self) -> bool:
+        """True if path auto-truncation was active during recording."""
+        return self._load_metadata().get("auto_truncated") == "true"
+
+    @property
+    def is_anonymized(self) -> bool:
+        """True if UID/GID were anonymized."""
+        return self._load_metadata().get("is_anonymized") == "true"
 
     def get_stats(self) -> dict:
         """Return tape metadata dictionary for backward compatibility and internal helpers."""
@@ -330,7 +371,8 @@ class Catalog:
                         "start_offset": v_start,
                         "end_offset": v_end,
                         "size": v_end - v_start,
-                        "md5sum": None,
+                        "checksum": None,
+                        "checksum_algorithm": self.checksum_algorithm or "sha256",
                     }
                 )
 

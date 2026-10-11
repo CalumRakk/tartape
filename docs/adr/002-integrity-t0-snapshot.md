@@ -64,3 +64,13 @@ We explicitly rejected this "relaxed" approach due to its negative semantic impl
 
 **Conclusion:**
 Semantic integrity (truthfulness of metadata) is as critical as structural integrity. The engine must enforce a strict "Fail Fast" policy on *any* metadata discrepancy found between T0 and T1.
+
+## Amendment (v3.1 - Pragmatic SQLite Concurrency & Clean-on-Close)
+
+### Context of the Amendment
+ADR-002 previously mandated sealing catalog databases into an immutable standalone file using SQLite `journal_mode=DELETE` to avoid auxiliary files. However, production workflows require post-recording read and write operations (such as registering slicing layouts and caching in-flight volume checksums) across concurrent background workers. Forcing `journal_mode=DELETE` caused severe reader/writer lock contentions (`database is locked`).
+
+### Decision
+1. **Embrace WAL for Active Tapes:** Active database sessions open in `journal_mode=wal` with `synchronous=NORMAL` to guarantee high concurrency across multiple processes without deadlocks.
+2. **Clean-on-Close Checkpoint:** Upon closing the tape session (`Tape.close()` or exiting `__enter__`), the engine executes `PRAGMA wal_checkpoint(TRUNCATE)`. This truncates the `-wal` file to 0 bytes and unlinks temporary auxiliary artifacts, leaving a clean directory when idle.
+3. **Explicit Read-Only Mode:** Catalog inspections without physical source files (`open_catalog()`) open SQLite using URI `mode=ro` (`file:<path>?mode=ro`). SQLite will not create, modify, or lock `-wal`/`-shm` files on read-only network shares or immutable volumes.

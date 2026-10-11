@@ -8,22 +8,52 @@ db_proxy = peewee.Proxy()
 
 
 class DatabaseSession:
-    """Context manager encapsulating database initialization and closure."""
+    """Context manager encapsulating database initialization, concurrency, and clean closure."""
 
-    def __init__(self, db_path: str | Path | Literal[":memory:"]):
-        self.db_path = Path(db_path) if db_path != ":memory:" else db_path
+    def __init__(
+        self,
+        db_path: str | Path | Literal[":memory:"],
+        read_only: bool = False,
+    ):
+        self._read_only = read_only
         self._depth = 0
         self._tables_initialized = False
 
-        self.db = peewee.SqliteDatabase(
-            str(self.db_path),
-            pragmas={
-                "journal_mode": "wal",
-                "cache_size": -1024 * 64,  # 64MB cache
+        if db_path == ":memory:":
+            self.db_path = ":memory:"
+            db_target = ":memory:"
+            uri = False
+            pragmas = {
+                "journal_mode": "memory",
                 "foreign_keys": 1,
-                "synchronous": "NORMAL",
-                "busy_timeout": 30000,  # 30s timeout for concurrent workers
-            },
+            }
+        else:
+            self.db_path = Path(db_path).resolve()
+            if self._read_only:
+                # Open with URI mode=ro: SQLite will not create or touch WAL/SHM files
+                db_target = f"file:{self.db_path.as_posix()}?mode=ro"
+                uri = True
+                pragmas = {
+                    "query_only": 1,
+                    "foreign_keys": 1,
+                    "cache_size": -1024 * 64,
+                    "busy_timeout": 30000,
+                }
+            else:
+                db_target = str(self.db_path)
+                uri = False
+                pragmas = {
+                    "journal_mode": "wal",
+                    "cache_size": -1024 * 64,  # 64MB cache
+                    "foreign_keys": 1,
+                    "synchronous": "NORMAL",
+                    "busy_timeout": 30000,  # 30s timeout for concurrent workers
+                }
+
+        self.db = peewee.SqliteDatabase(
+            db_target,
+            uri=uri,
+            pragmas=pragmas,
             timeout=30,
         )
         from tartape.models import LayoutRecord, TapeMetadata, Track, VolumeRecord
@@ -36,7 +66,7 @@ class DatabaseSession:
             if self._depth == 0:
                 if self.db.is_closed():
                     self.db.connect()
-                if not self._tables_initialized:
+                if not self._read_only and not self._tables_initialized:
                     self.db.create_tables(self._models, safe=True)
                     self._tables_initialized = True
             self._depth += 1
@@ -51,10 +81,7 @@ class DatabaseSession:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self._depth = max(0, self._depth - 1)
         if self._depth == 0 and not self.db.is_closed():
-            try:
-                self.db.close()
-            except Exception:
-                pass
+            self._cleanup_on_close()
 
         if exc_type and issubclass(
             exc_type, (peewee.DatabaseError, sqlite3.DatabaseError)
@@ -65,13 +92,26 @@ class DatabaseSession:
                 f"Database error at '{self.db_path}': {exc_val}"
             ) from exc_val
 
+    def _cleanup_on_close(self) -> None:
+        """Perform a clean WAL checkpoint and close the database connection."""
+        if not self.db.is_closed():
+            if not self._read_only and self.db_path != ":memory:":
+                try:
+                    # Truncates WAL file back to 0 bytes so folder stays pristine
+                    self.db.execute_sql("PRAGMA wal_checkpoint(TRUNCATE);")
+                except Exception:
+                    pass
+            try:
+                self.db.close()
+            except Exception:
+                pass
+
     def connect(self):
         return self.__enter__()
 
     def close(self):
         self._depth = 0
-        if not self.db.is_closed():
-            self.db.close()
+        self._cleanup_on_close()
 
 
 def seal_database(db_path: str | Path) -> None:

@@ -128,6 +128,37 @@ class Tape(os.PathLike):
         except (json.JSONDecodeError, TypeError):
             return value
 
+    @property
+    def checksum_algorithm(self) -> Optional[str]:
+        """Return the configured checksum algorithm (or None)."""
+        algo = self._stats.get("checksum_algorithm")
+        return algo if algo and algo != "none" else None
+
+    @property
+    def has_file_checksums(self) -> bool:
+        """Check if individual file checksums were computed at T0."""
+        return self._stats.get("has_file_checksums") == "true"
+
+    @property
+    def data_size(self) -> int:
+        """Return total uncompressed payload size in bytes."""
+        return int(self._stats.get("data_size", 0))
+
+    @property
+    def overhead_size(self) -> int:
+        """Return TAR packaging overhead size in bytes."""
+        return max(0, self.total_size - self.data_size)
+
+    @property
+    def auto_truncated(self) -> bool:
+        """Return whether long paths were automatically truncated."""
+        return self._stats.get("auto_truncated") == "true"
+
+    @property
+    def is_anonymized(self) -> bool:
+        """Return whether ownership metadata was anonymized."""
+        return self._stats.get("is_anonymized") == "true"
+
     def get_tracks(self):
         """Yield all tracks sorted for the stream."""
         cat = self._get_catalog()
@@ -148,18 +179,12 @@ class Tape(os.PathLike):
                 sidecar.unlink()
 
     def _select_canary_tracks(self, total_tracks: int) -> list[Track]:
-        """Select strategic sentinel tracks for ultra-fast canary verification.
-
-        Combines boundary tracks, volatile hot-files, structural directories,
-        and stratified offset deciles without using non-deterministic table scans.
-        """
-        # Small dataset graceful fallback: verify 100% of tracks if count <= 50
+        """Select strategic sentinel tracks for ultra-fast canary verification."""
         if total_tracks <= 50:
             return list(Track.select().order_by(Track.arc_path))
 
         canaries: dict[str, Track] = {}
 
-        # Boundary Sentinels: First and Last tracks in the archive stream
         first_track = Track.select().order_by(Track.start_offset.asc()).first()  # type: ignore
         if first_track:
             canaries[first_track.arc_path] = first_track
@@ -168,11 +193,9 @@ class Tape(os.PathLike):
         if last_track:
             canaries[last_track.arc_path] = last_track
 
-        # Structural Sentinels: All recorded directories (catches additions/deletions)
         for dir_track in Track.select().where(Track.is_dir == True):
             canaries[dir_track.arc_path] = dir_track
 
-        # Volatility Sentinels: Top 10 most recently modified regular files at T0
         hot_tracks = (
             Track.select()
             .where((Track.is_dir == False) & (Track.is_symlink == False))
@@ -182,7 +205,6 @@ class Tape(os.PathLike):
         for hot_track in hot_tracks:
             canaries[hot_track.arc_path] = hot_track
 
-        # Decile Strata Sentinels: Deterministic offset probes across tape coordinates
         if self.total_size > 0:
             for step in range(1, 10):
                 target_offset = int(self.total_size * (step / 10.0))
@@ -202,22 +224,7 @@ class Tape(os.PathLike):
     def verify(
         self, deep: bool = True, raise_exception: bool = False
     ) -> VerificationReport:
-        """Verify whether physical disk state matches the recorded tape catalog.
-
-        Args:
-            deep: If True, performs a thorough 100% audit of all recorded tracks.
-                If False, runs an ultra-fast canary audit using boundary, hot-file,
-                structural, and decile sentinels.
-            raise_exception: If True, immediately raises TarIntegrityError on the
-                first detected discrepancy instead of returning a report.
-
-        Returns:
-            VerificationReport: Rich audit report indicating validity and discrepancies.
-
-        Raises:
-            TarIntegrityError: If raise_exception is True and a discrepancy is found.
-            TapeVerificationError: If an unexpected system error occurs during verification.
-        """
+        """Verify whether physical disk state matches the recorded tape catalog."""
         start_time = time.perf_counter()
         discrepancies: list[Discrepancy] = []
 
@@ -226,7 +233,6 @@ class Tape(os.PathLike):
             with cat, cat.db_session:
                 total_tracks = Track.select().count()
 
-                # Structural check on root directory with exclusion awareness
                 root_discrepancy = validate_root_structure_integrity(
                     self.directory,
                     exclude=self.exclude_patterns,
@@ -235,7 +241,6 @@ class Tape(os.PathLike):
                 if root_discrepancy:
                     discrepancies.append(root_discrepancy)
 
-                # Select tracks based on verification mode
                 if deep:
                     tracks_to_check = Track.select().order_by(Track.arc_path)
                 else:
@@ -344,6 +349,7 @@ class Tape(os.PathLike):
                     layout_tag=layout.tag,
                     total_volumes=layout.total_volumes,
                     catalog_path=cat.path,
+                    checksum_algorithm=self.checksum_algorithm or "sha256",
                 )
                 yield volume
 
@@ -387,7 +393,10 @@ class Tape(os.PathLike):
                     yield ManifestEntry.from_track(track, tape_window)
 
             engine = TarStreamGenerator(
-                track_loader(), self.directory, total_tape_size=self.total_size
+                track_loader(),
+                self.directory,
+                total_tape_size=self.total_size,
+                checksum_algorithm=self.checksum_algorithm,
             )
             yield from engine.stream_bytes(
                 start_offset=start_offset,
@@ -425,7 +434,12 @@ class Tape(os.PathLike):
                     volume_window,
                     total_size=self.total_size,
                 )
-            return Volume(self.directory, manifest, vol_name)
+            return Volume(
+                self.directory,
+                manifest,
+                vol_name,
+                checksum_algorithm=self.checksum_algorithm or "sha256",
+            )
 
         vol_index = int(index)
         with cat:
@@ -455,6 +469,7 @@ class Tape(os.PathLike):
                 layout_tag=layout.tag,
                 total_volumes=layout.total_volumes,
                 catalog_path=cat.path,
+                checksum_algorithm=self.checksum_algorithm or "sha256",
             )
 
     def get_file_slices(self, arc_path: str, chunk_size: int) -> list[FileSlice]:

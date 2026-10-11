@@ -43,8 +43,13 @@ class FileStartMetadata:
 @dataclass(frozen=True)
 class FileEndMetadata:
     end_offset: int
-    md5sum: Optional[str]
+    checksum: Optional[str]
     is_complete: bool
+
+    @property
+    def md5sum(self) -> Optional[str]:
+        """Legacy compatibility alias for checksum."""
+        return self.checksum
 
 
 @dataclass(frozen=True)
@@ -145,7 +150,12 @@ class EntryMetadata:
     is_dir: bool
     is_symlink: bool = False
     linkname: str = ""
-    md5sum: Optional[str] = None
+    checksum: Optional[str] = None
+
+    @property
+    def md5sum(self) -> Optional[str]:
+        """Legacy compatibility alias for checksum."""
+        return self.checksum
 
     @property
     def has_content(self) -> bool:

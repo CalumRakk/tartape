@@ -125,7 +125,7 @@ with tartape.open("./my_dataset") as tape:
 ---
 
 ### 2. Splitting into Chunks for Cloud Multipart Uploads
-Cloud storage providers (like AWS S3) prefer uploads split into parts. TarTape can divide your archive into virtual chunks on-the-fly using human sizes:
+Cloud storage providers (like AWS S3) prefer uploads split into parts. TarTape can divide your archive into virtual chunks on-the-fly:
 
 ```python
 import boto3
@@ -145,8 +145,8 @@ with tartape.open("./my_dataset") as tape:
                 Fileobj=volume, Bucket=bucket, Key=f"backups/{volume.name}"
             )
 
-            # Checksum is calculated automatically during upload
-            print(f"Part uploaded - MD5: {volume.md5sum}")
+            # In-flight checksum is calculated passively during upload (zero extra I/O)
+            print(f"Part uploaded - {volume.checksum_algorithm}: {volume.checksum}")
 ```
 
 ---
@@ -272,6 +272,7 @@ tape = tartape.record(
 )
 ```
 
+
 ---
 
 ### 8. Checking for File Changes Before Streaming
@@ -295,6 +296,30 @@ with tartape.open("./my_dataset") as tape:
 
     # Or run an ultra-fast Canary check (<15ms) across boundary and volatile sentinels:
     # canary_report = tape.verify(deep=False)
+```
+
+### 9. Recording with File Checksums and Metadata Inspection
+You can index directory metadata instantly (default), or pre-calculate cryptographic file checksums using SHA-256 or MD5:
+
+```python
+import tartape
+
+# Fast metadata-only scan (default)
+tape = tartape.record("./my_dataset")
+
+# Or calculate file checksums upfront using SHA-256:
+tape = tartape.record("./my_dataset", checksum="sha256", auto_truncate=True)
+
+# Rich inspection metrics:
+print(f"Algorithm:       {tape.checksum_algorithm}")  # 'sha256'
+print(f"Has file hashes: {tape.has_file_checksums}")  # True
+print(f"Raw data size:   {tape.data_size:,} bytes")  # Net uncompressed payload
+print(
+    f"Total TAR size:  {tape.total_size:,} bytes"
+)  # Stream size (with headers & padding)
+print(
+    f"TAR overhead:    {tape.overhead_size:,} bytes"
+)  # Header + padding byte overhead
 ```
 
 ---

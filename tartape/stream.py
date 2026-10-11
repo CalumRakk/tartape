@@ -7,7 +7,12 @@ from typing import TYPE_CHECKING, Callable, Generator, Iterable, Optional
 if TYPE_CHECKING:
     from tartape.tape import Tape
 
-from tartape.exceptions import InvalidOffsetError, TarIntegrityError, VolumeStateError
+from tartape.exceptions import (
+    InvalidOffsetError,
+    SourceNotFoundError,
+    TarIntegrityError,
+    VolumeStateError,
+)
 from tartape.factory import validate_integrity
 from tartape.header import TarHeader
 
@@ -36,10 +41,14 @@ class TarStreamGenerator:
         entries: Iterable[ManifestEntry],
         directory: str | Path,
         total_tape_size: int | None = None,
+        checksum_algorithm: Optional[str] = None,
     ):
         self.directory = Path(directory)
         self.entries = entries
         self.total_tape_size = total_tape_size
+        self.checksum_algorithm = (
+            checksum_algorithm.lower() if checksum_algorithm else None
+        )
 
     def _dispatch(
         self,
@@ -81,15 +90,15 @@ class TarStreamGenerator:
 
             yield from self._emit_header_bytes(entry, start_offset)
 
-            md5_hash: Optional[str] = None
+            checksum_val: Optional[str] = None
             if entry.has_content:
-                md5_hash = yield from self._stream_content_bytes(
+                checksum_val = yield from self._stream_content_bytes(
                     entry, start_offset, effective_chunk_size
                 )
                 for pad_chunk in self._emit_padding_bytes(entry, start_offset):
                     yield pad_chunk
 
-            end_event = self._create_event_end(entry, md5_hash)
+            end_event = self._create_event_end(entry, checksum_val)
             self._dispatch(end_event, on_event, observer)
             last_offset = entry.global_window.end
 
@@ -119,14 +128,14 @@ class TarStreamGenerator:
             yield self._create_event_start(entry, start_offset)
             yield from self._emit_header(entry, start_offset)
 
-            md5_hash: Optional[str] = None
+            checksum_val: Optional[str] = None
             if entry.has_content:
-                md5_hash = yield from self._stream_file_content_safely(
+                checksum_val = yield from self._stream_file_content_safely(
                     entry, start_offset, effective_chunk_size
                 )
                 yield from self._emit_padding(entry, start_offset)
 
-            yield self._create_event_end(entry, md5_hash)
+            yield self._create_event_end(entry, checksum_val)
             last_offset = entry.global_window.end
 
         footer_start = (
@@ -157,7 +166,13 @@ class TarStreamGenerator:
 
         source_path = entry.get_absolute_path(self.directory)
         validate_integrity(entry.info, self.directory)
-        md5 = hashlib.md5() if local_skip == 0 else None
+
+        hasher = None
+        if local_skip == 0 and self.checksum_algorithm:
+            try:
+                hasher = hashlib.new(self.checksum_algorithm)
+            except ValueError:
+                hasher = hashlib.new(self.checksum_algorithm, usedforsecurity=False)
 
         try:
             with open(source_path, "rb") as f:
@@ -170,8 +185,8 @@ class TarStreamGenerator:
                     if not chunk:
                         raise TarIntegrityError(f"File shrunk: '{source_path}'")
 
-                    if md5:
-                        md5.update(chunk)
+                    if hasher:
+                        hasher.update(chunk)
                     bytes_remaining -= len(chunk)
                     yield chunk
 
@@ -184,7 +199,7 @@ class TarStreamGenerator:
         except OSError as e:
             raise TarIntegrityError(f"Error reading {source_path}") from e
 
-        return md5.hexdigest() if md5 else None
+        return hasher.hexdigest() if hasher else None
 
     def _emit_padding_bytes(
         self, entry: ManifestEntry, global_skip: int
@@ -222,15 +237,15 @@ class TarStreamGenerator:
         )
 
     def _create_event_end(
-        self, entry: ManifestEntry, md5: Optional[str]
+        self, entry: ManifestEntry, checksum_val: Optional[str]
     ) -> TarFileEndEvent:
         return TarFileEndEvent(
             type="file_end",
             entry=entry,
             metadata=FileEndMetadata(
-                md5sum=md5,
+                checksum=checksum_val,
                 end_offset=entry.global_window.end,
-                is_complete=(md5 is not None),
+                is_complete=(checksum_val is not None),
             ),
         )
 
@@ -261,7 +276,13 @@ class TarStreamGenerator:
 
         source_path = entry.get_absolute_path(self.directory)
         validate_integrity(entry.info, self.directory)
-        md5 = hashlib.md5() if local_skip == 0 else None
+
+        hasher = None
+        if local_skip == 0 and self.checksum_algorithm:
+            try:
+                hasher = hashlib.new(self.checksum_algorithm)
+            except ValueError:
+                hasher = hashlib.new(self.checksum_algorithm, usedforsecurity=False)
 
         try:
             with open(source_path, "rb") as f:
@@ -274,8 +295,8 @@ class TarStreamGenerator:
                     if not chunk:
                         raise TarIntegrityError(f"File shrunk: '{source_path}'")
 
-                    if md5:
-                        md5.update(chunk)
+                    if hasher:
+                        hasher.update(chunk)
                     bytes_remaining -= len(chunk)
                     yield TarFileDataEvent(type="file_data", data=chunk)
 
@@ -288,7 +309,7 @@ class TarStreamGenerator:
         except OSError as e:
             raise TarIntegrityError(f"Error reading {source_path}") from e
 
-        return md5.hexdigest() if md5 else None
+        return hasher.hexdigest() if hasher else None
 
     def _emit_padding(
         self, entry: ManifestEntry, global_skip: int
@@ -410,6 +431,7 @@ class Volume(io.BufferedIOBase):
         layout_tag: Optional[str] = None,
         total_volumes: Optional[int] = None,
         catalog_path: Optional[Path] = None,
+        checksum_algorithm: Optional[str] = "sha256",
     ):
         self.directory = Path(directory)
         self.manifest = manifest
@@ -421,6 +443,9 @@ class Volume(io.BufferedIOBase):
         self.layout_tag = layout_tag
         self.total_volumes = total_volumes
         self._catalog_path = catalog_path
+        self.checksum_algorithm = (
+            checksum_algorithm.lower() if checksum_algorithm else None
+        )
 
         # Streaming state
         self._stream_gen = None
@@ -428,11 +453,11 @@ class Volume(io.BufferedIOBase):
         self._buffer = bytearray()
         self._closed = True
 
-        # Integrity & hashing state
-        self._md5 = hashlib.md5()
+        # In-flight integrity state
+        self._hasher = None
         self._hash_cursor = 0
         self._integrity_broken = False
-        self._final_md5: Optional[str] = None
+        self._final_checksum: Optional[str] = None
 
     def __repr__(self) -> str:
         return f"<Volume #{self.index} '{self.name}' ({self.size} bytes)>"
@@ -446,6 +471,16 @@ class Volume(io.BufferedIOBase):
         if self._closed:
             raise VolumeStateError("I/O operation on closed volume.")
 
+    def _init_hasher(self):
+        if not self.checksum_algorithm:
+            self._hasher = None
+            return
+
+        try:
+            self._hasher = hashlib.new(self.checksum_algorithm)
+        except ValueError:
+            self._hasher = hashlib.new(self.checksum_algorithm, usedforsecurity=False)
+
     def _init_stream(self, offset_in_volume: int):
         self._position = offset_in_volume
         self._buffer.clear()
@@ -454,15 +489,15 @@ class Volume(io.BufferedIOBase):
             self._stream_gen.close()
 
         if offset_in_volume == 0:
-            self._md5 = hashlib.md5()
+            self._init_hasher()
             self._hash_cursor = 0
             self._integrity_broken = False
         elif offset_in_volume != self._hash_cursor:
             self._integrity_broken = True
-            logger.warning(
+            logger.debug(
                 f"Non-linear seek detected in {self.name}. "
                 f"Position: {offset_in_volume}, Hash Cursor: {self._hash_cursor}. "
-                "Linear MD5 calculation disabled for this pass."
+                "In-flight checksum disabled for this pass."
             )
 
         global_target = self.start_offset + offset_in_volume
@@ -470,11 +505,117 @@ class Volume(io.BufferedIOBase):
             self.manifest.entries,
             self.directory,
             total_tape_size=self.manifest.total_size,
+            checksum_algorithm=self.checksum_algorithm,
         )
         self._stream_gen = engine.stream(start_offset=global_target)
 
-    def _calculate_manually(self) -> str:
-        hasher = hashlib.md5()
+    def _persist_checksum(self, checksum_val: str) -> None:
+        """Safely persist calculated checksum to the catalog database."""
+        if not self._catalog_path or not self.layout_tag:
+            return
+
+        catalog_file = Path(self._catalog_path)
+        if not catalog_file.exists():
+            return
+
+        import sqlite3
+
+        try:
+            with sqlite3.connect(str(catalog_file), timeout=30.0) as conn:
+                conn.execute(
+                    "UPDATE volumes SET checksum = ?, checksum_algorithm = ? "
+                    "WHERE layout_tag = ? AND volume_index = ?",
+                    (
+                        checksum_val,
+                        self.checksum_algorithm,
+                        self.layout_tag,
+                        self.index,
+                    ),
+                )
+                conn.commit()
+        except (sqlite3.OperationalError, sqlite3.DatabaseError) as e:
+            logger.debug(
+                f"Skipping checksum persistence for volume {self.index} (catalog is read-only or busy): {e}"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to persist checksum for volume {self.index}: {e}")
+
+    def _load_cached_checksum(self) -> Optional[str]:
+        """Try loading previously persisted checksum from the catalog DB."""
+        if not self._catalog_path or not self.layout_tag:
+            return None
+
+        catalog_file = Path(self._catalog_path)
+        if not catalog_file.exists():
+            return None
+
+        import sqlite3
+
+        try:
+            with sqlite3.connect(
+                f"file:{catalog_file.as_posix()}?mode=ro", uri=True, timeout=5.0
+            ) as conn:
+                cursor = conn.execute(
+                    "SELECT checksum, checksum_algorithm FROM volumes "
+                    "WHERE layout_tag = ? AND volume_index = ?",
+                    (self.layout_tag, self.index),
+                )
+                row = cursor.fetchone()
+                if row and row[0]:
+                    if not self.checksum_algorithm and row[1]:
+                        self.checksum_algorithm = row[1]
+                    return row[0]
+        except Exception:
+            return None
+        return None
+
+    @property
+    def checksum(self) -> Optional[str]:
+        """Return the computed checksum if completed linearly, or cached from catalog.
+
+        Does NOT perform disk I/O. Returns None if unread or interrupted.
+        """
+        if self._final_checksum:
+            return self._final_checksum
+
+        if (
+            not self._integrity_broken
+            and self._hash_cursor == self.size
+            and self._hasher is not None
+        ):
+            self._final_checksum = self._hasher.hexdigest()
+            self._persist_checksum(self._final_checksum)
+            return self._final_checksum
+
+        cached_val = self._load_cached_checksum()
+        if cached_val:
+            self._final_checksum = cached_val
+            return self._final_checksum
+
+        return None
+
+    @property
+    def md5sum(self) -> Optional[str]:
+        """Legacy compatibility alias for checksum."""
+        return self.checksum
+
+    def compute_checksum(self, algorithm: Optional[str] = None) -> str:
+        """Deliberately compute the volume checksum by reading from source files on disk.
+
+        Raises:
+            SourceNotFoundError: If source files are not accessible on disk.
+        """
+        if not self.directory.exists() or not self.directory.is_dir():
+            raise SourceNotFoundError(
+                f"Cannot compute checksum: source directory not found at '{self.directory}'"
+            )
+
+        algo = (algorithm or self.checksum_algorithm or "sha256").lower()
+        try:
+            hasher = hashlib.new(algo)
+        except ValueError:
+            hasher = hashlib.new(algo, usedforsecurity=False)
+
         engine = TarStreamGenerator(
             self.manifest.entries,
             self.directory,
@@ -497,43 +638,11 @@ class Volume(io.BufferedIOBase):
                 hasher.update(data)
                 bytes_hashed += len(data)
 
-        return hasher.hexdigest()
-
-    def _persist_md5(self, md5_val: str) -> None:
-        """Atomically persist calculated MD5 to the catalog database in a thread-safe manner."""
-        if not self._catalog_path or not self.layout_tag:
-            return
-
-        catalog_file = Path(self._catalog_path)
-        if not catalog_file.exists():
-            return
-
-        import sqlite3
-
-        try:
-            with sqlite3.connect(str(catalog_file), timeout=30.0) as conn:
-                conn.execute(
-                    "UPDATE volumes SET md5sum = ? WHERE layout_tag = ? AND volume_index = ?",
-                    (md5_val, self.layout_tag, self.index),
-                )
-                conn.commit()
-        except Exception as e:
-            logger.warning(f"Failed to persist MD5 for volume {self.index}: {e}")
-
-    @property
-    def md5sum(self) -> str:
-        """Return the MD5 hash, updating database cache if calculated linearly."""
-        if self._final_md5:
-            return self._final_md5
-
-        if not self._integrity_broken and self._hash_cursor == self.size:
-            self._final_md5 = self._md5.hexdigest()
-            self._persist_md5(self._final_md5)
-            return self._final_md5
-
-        self._final_md5 = self._calculate_manually()
-        self._persist_md5(self._final_md5)
-        return self._final_md5
+        digest = hasher.hexdigest()
+        self._final_checksum = digest
+        self.checksum_algorithm = algo
+        self._persist_checksum(digest)
+        return digest
 
     @property
     def is_completed(self) -> bool:
@@ -549,10 +658,14 @@ class Volume(io.BufferedIOBase):
             self._stream_gen.close()
         self._closed = True
 
-        if not self._integrity_broken and self._hash_cursor == self.size:
-            if not self._final_md5:
-                self._final_md5 = self._md5.hexdigest()
-            self._persist_md5(self._final_md5)
+        if (
+            not self._integrity_broken
+            and self._hash_cursor == self.size
+            and self._hasher is not None
+        ):
+            if not self._final_checksum:
+                self._final_checksum = self._hasher.hexdigest()
+            self._persist_checksum(self._final_checksum)
 
     def open(self):
         self.__enter__()
@@ -587,9 +700,9 @@ class Volume(io.BufferedIOBase):
         chunk = bytes(self._buffer[:chunk_size])
         self._buffer = self._buffer[chunk_size:]
 
-        if not self._integrity_broken:
+        if not self._integrity_broken and self._hasher is not None:
             if self._position == self._hash_cursor:
-                self._md5.update(chunk)
+                self._hasher.update(chunk)
                 self._hash_cursor += len(chunk)
             else:
                 self._integrity_broken = True

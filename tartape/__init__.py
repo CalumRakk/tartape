@@ -46,7 +46,7 @@ def record(
     catalog_path: Optional[str | Path] = None,
     exclude: Optional[ExcludeType] = None,
     anonymize: bool = True,
-    calculate_hashes: bool = False,
+    checksum: str | bool = False,
     overwrite: bool = False,
     auto_truncate: bool = False,
 ) -> Tape:
@@ -61,7 +61,8 @@ def record(
             `<directory.parent>/<directory.name>.tartape`.
         exclude: Patterns or callable to skip specific files or directories.
         anonymize: If True, scrubs UID/GID and sets ownership to 'root'.
-        calculate_hashes: If True, computes MD5 hashes for all files during scan.
+        checksum: False to skip file hashing; True for default ('sha256'); or an
+            algorithm name ('sha256', 'md5', etc.).
         overwrite: If True, replaces existing catalog file at destination.
         auto_truncate: If True, automatically shortens components exceeding 100 bytes.
 
@@ -73,7 +74,7 @@ def record(
         catalog_path=catalog_path,
         exclude=exclude,
         anonymize=anonymize,
-        calculate_hashes=calculate_hashes,
+        checksum=checksum,
         overwrite=overwrite,
         auto_truncate=auto_truncate,
     )
@@ -110,15 +111,20 @@ def open(
     return Tape(dir_path)
 
 
-def open_catalog(catalog_path: str | Path) -> Catalog:
-    """Open a standalone .tartape catalog file in offline/zero-disk mode.
-
-    Does not require the original source directory to exist on disk.
-    """
+def open_catalog(catalog_path: str | Path, read_only: bool = False) -> Catalog:
+    """Open a standalone .tartape catalog file in offline/zero-disk mode."""
     path = Path(catalog_path)
     if not path.exists():
         raise TapeNotFoundError(f"Catalog file not found at: {catalog_path}")
-    return Catalog(path)
+    return Catalog(path, read_only=read_only)
+
+
+def get_tape(directory: str | Path) -> Optional[Tape]:
+    """Safely open an existing tape, returning None if not found."""
+    try:
+        return open(directory)
+    except TapeNotFoundError:
+        return None
 
 
 def exists(directory: str | Path, catalog_path: Optional[str | Path] = None) -> bool:

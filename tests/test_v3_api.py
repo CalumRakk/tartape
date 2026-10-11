@@ -132,7 +132,8 @@ class TestObserverTelemetryProtocol(unittest.TestCase):
         (self.source / "sub").mkdir()
         (self.source / "sub" / "image.bin").write_bytes(b"XYZ" * 500)
 
-        self.tape = tartape.create(self.source)
+        # Enable MD5 checksum so that TarFileEndEvent carries the expected file checksum
+        self.tape = tartape.create(self.source, checksum="md5")
 
     def tearDown(self):
         self.tmp_dir.cleanup()

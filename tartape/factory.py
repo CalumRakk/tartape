@@ -63,13 +63,7 @@ def check_directory_structural_integrity(
     tape_root_directory: Path,
     exclude: Optional[ExcludeType] = None,
 ) -> Optional[Discrepancy]:
-    """Verify structural integrity of a directory while tolerating excluded OS artifacts.
-
-    If directory mtime changed, inspects disk children:
-    - If untracked, non-excluded files exist -> untracked_item discrepancy.
-    - If NO excluded items exist to explain the mtime mutation -> structural_change discrepancy.
-    - If excluded items (e.g. .DS_Store) exist and all other items are tracked -> tolerated as OS noise.
-    """
+    """Verify structural integrity of a directory while tolerating excluded OS artifacts."""
     full_disk_path = Path(tape_root_directory) / expected.rel_path
     stats = TarEntryFactory.inspect(full_disk_path)
 
@@ -81,15 +75,12 @@ def check_directory_structural_integrity(
             message=f"Directory missing: '{expected.arc_path}'",
         )
 
-    # Root directory is audited separately by validate_root_structure_integrity
     if expected.rel_path in ("", "."):
         return None
 
-    # Fast path: mtime is perfectly intact
     if stats.mtime == expected.mtime:
         return None
 
-    # Defensive path: mtime changed, inspect directory contents
     try:
         untracked_unexcluded: list[str] = []
         has_excluded_items = False
@@ -122,8 +113,6 @@ def check_directory_structural_integrity(
                 ),
             )
 
-        # If mtime changed and NO excluded items exist to explain the mutation,
-        # it is a critical structural integrity violation per ADR-002.
         if not has_excluded_items:
             return Discrepancy(
                 arc_path=expected.arc_path,
@@ -150,16 +139,7 @@ def check_entry_integrity(
     tape_root_directory: Path,
     exclude: Optional[ExcludeType] = None,
 ) -> Optional[Discrepancy]:
-    """Perform integrity check on a single entry, returning Discrepancy if invalid.
-
-    Args:
-        expected: Track or EntryMetadata from catalog baseline.
-        tape_root_directory: Physical root directory on disk.
-        exclude: Exclusion rules to tolerate OS artifacts in directories.
-
-    Returns:
-        Optional[Discrepancy]: None if intact, Discrepancy object if mutated or missing.
-    """
+    """Perform integrity check on a single entry, returning Discrepancy if invalid."""
     full_disk_path = Path(tape_root_directory) / expected.rel_path
     stats = TarEntryFactory.inspect(full_disk_path)
 
@@ -266,9 +246,7 @@ def validate_root_structure_integrity(
 def validate_ustar_path(
     arcname: str, is_dir: bool = False
 ) -> tuple[bool, Optional[str]]:
-    """
-    Verifies whether a route strictly complies with the USTAR (155/100) splitting rules and the 255-byte total limit.
-    """
+    """Verifies whether a route strictly complies with USTAR rules and 255-byte limit."""
     target = arcname if not is_dir or arcname.endswith("/") else arcname + "/"
     target_bytes = target.encode("utf-8")
 
@@ -289,7 +267,6 @@ def validate_ustar_path(
     if len(target_bytes) <= 100:
         return True, None
 
-    # Check if there is at least one split at '/' that satisfies prefix <= 155 and name <= 100
     has_valid_cut = False
     for i, char in enumerate(target):
         if char == "/":
@@ -311,29 +288,21 @@ def validate_ustar_path(
 
 
 def truncate_component_safe(component: str, max_bytes: int = 100) -> str:
-    """
-    Truncates a path component to a maximum byte length, ensuring
-    UTF-8 validity and preventing name collisions via hashing.
-    """
+    """Truncates a path component safely using MD5 with usedforsecurity=False."""
     comp_bytes = component.encode("utf-8")
 
     if len(comp_bytes) <= max_bytes:
         return component
 
-    hash_suffix = hashlib.md5(comp_bytes).hexdigest()[:14]
+    # Non-cryptographic hashing: usedforsecurity=False ensures FIPS compliance
+    hash_suffix = hashlib.md5(comp_bytes, usedforsecurity=False).hexdigest()[:14]
     limit_for_prefix = max_bytes - 15
 
     prefix_bytes = comp_bytes[:limit_for_prefix]
-
-    # Decode back to string. 'ignore' is crucial: if byte 85 was the
-    # start of a 4-byte emoji, it will be dropped, preventing
-    # "Invalid UTF-8" errors.
     safe_prefix = prefix_bytes.decode("utf-8", errors="ignore")
 
     result = f"{safe_prefix}_{hash_suffix}"
 
-    # If this fails, we decrease the prefix length further.
-    # This handles edge cases with certain multi-byte combining characters.
     while len(result.encode("utf-8")) > max_bytes:
         safe_prefix = safe_prefix[:-1]
         result = f"{safe_prefix}_{hash_suffix}"
@@ -342,14 +311,10 @@ def truncate_component_safe(component: str, max_bytes: int = 100) -> str:
 
 
 def shorten_path_ustar(arcname: str, is_dir: bool = False) -> str:
-    """
-    Deterministically shortens a path to comply with USTAR.
-    Preserves the root and the final name, collapsing intermediate directories into a hash.
-    """
+    """Deterministically shortens a path to comply with USTAR standard."""
     components = arcname.split("/")
     max_leaf_bytes = 99 if is_dir else 100
 
-    # Ensure that no individual component exceeds 100 bytes.
     clean_components = []
     for i, comp in enumerate(components):
         limit = max_leaf_bytes if i == len(components) - 1 else 100
@@ -362,28 +327,26 @@ def shorten_path_ustar(arcname: str, is_dir: bool = False) -> str:
     if valid:
         return candidate
 
-    # If it is only one component (e.g., root)
     if len(clean_components) == 1:
         comp = clean_components[0]
         if len(comp.encode("utf-8")) > max_leaf_bytes:
             comp = truncate_component_safe(comp, max_leaf_bytes)
         return comp
 
-    # Separate sheet and prefix
     leaf = clean_components[-1]
     prefix_components = clean_components[:-1]
     full_prefix = "/".join(prefix_components)
 
-    # Maximum limit for the prefix, ensuring the total is <= 255 (or 254 if it is a folder)
     max_total = 254 if is_dir else 255
     max_prefix_bytes = min(155, max_total - 1 - len(leaf.encode("utf-8")))
 
-    # Deterministic hash of the original prefix path
-    prefix_hash = hashlib.md5(full_prefix.encode("utf-8")).hexdigest()[:8]
+    # Non-cryptographic hashing: usedforsecurity=False ensures FIPS compliance
+    prefix_hash = hashlib.md5(
+        full_prefix.encode("utf-8"), usedforsecurity=False
+    ).hexdigest()[:8]
     marker = f"~{prefix_hash}"
 
     root = prefix_components[0]
-    # If the root alone is too long, truncate it to fit the marker
     min_root_space = max_prefix_bytes - len(marker.encode("utf-8")) - 1
     if len(root.encode("utf-8")) > min_root_space:
         root = truncate_component_safe(root, max(10, min_root_space))
@@ -391,7 +354,6 @@ def shorten_path_ustar(arcname: str, is_dir: bool = False) -> str:
     base_prefix = f"{root}/{marker}"
     current_bytes = len(base_prefix.encode("utf-8"))
 
-    # Try to fit in as many final immediate folders as possible
     tail_candidates = prefix_components[1:]
     chosen_tail = []
 
@@ -403,33 +365,19 @@ def shorten_path_ustar(arcname: str, is_dir: bool = False) -> str:
         else:
             break
 
-    if chosen_tail:
-        shortened_prefix = f"{base_prefix}/" + "/".join(chosen_tail)
-    else:
-        shortened_prefix = base_prefix
-
+    shortened_prefix = (
+        f"{base_prefix}/" + "/".join(chosen_tail) if chosen_tail else base_prefix
+    )
     return f"{shortened_prefix}/{leaf}"
 
 
 class TarEntryFactory:
-    """
-    Exclusively responsible for inspecting the file system
-    and instantiating valid TarEntry objects.
-
-    Centralizes:
-    1. Usage of lstat (to avoid following symlinks).f
-    2. Type filtering (Only File, Dir, Link are supported).
-    3. Metadata extraction (Users, Groups, Permissions).
-    """
+    """Exclusively responsible for inspecting the filesystem and building EntryMetadata."""
 
     @staticmethod
     def resolve_arcname(
         arcname: str, auto_truncate: bool = False, is_dir: bool = False
     ) -> str:
-        """
-        Validates USTAR restrictions. If auto_truncate is True,
-        it deterministically truncates the path.
-        """
         valid, reason = validate_ustar_path(arcname, is_dir=is_dir)
         if valid:
             return arcname
@@ -438,7 +386,6 @@ class TarEntryFactory:
             raise PathConstraintError(reason or "Path violates USTAR constraints.")
 
         resolved = shorten_path_ustar(arcname, is_dir=is_dir)
-
         valid_final, reason_final = validate_ustar_path(resolved, is_dir=is_dir)
         if not valid_final:
             raise PathConstraintError(
@@ -448,58 +395,34 @@ class TarEntryFactory:
         return resolved
 
     @staticmethod
-    def validate_path_constraints(arcname: str):
-        """
-        Validates ADR-005 constraints during the recording phase.
-        Ensures that the path will be compatible with USTAR and TarTape
-        before adding it to the catalog.
-        """
-        path_bytes = arcname.encode("utf-8")
+    def calculate_checksum(path: Path, algorithm: str = "sha256") -> str:
+        """Calculate the cryptographic checksum of a file in 64 KB blocks."""
+        try:
+            hasher = hashlib.new(algorithm)
+        except ValueError:
+            hasher = hashlib.new(algorithm, usedforsecurity=False)
 
-        # USTAR absolute limit
-        if len(path_bytes) > 255:
-            raise PathConstraintError(
-                f"Path too long ({len(path_bytes)} bytes). Max 255 allowed by USTAR."
-            )
-
-        # ADR-005: Component limit (100 bytes)
-        components = arcname.split("/")
-        for component in components:
-            if len(component.encode("utf-8")) > 100:
-                raise PathConstraintError(
-                    f"ADR-005 Violation: Path component '{component}' exceeds 100 bytes. "
-                    "This is required to ensure directory metadata integrity."
-                )
-
-    @staticmethod
-    def calculate_md5(path: Path) -> str:
-        """Calculate the MD5 hash of a file in 64 KB blocks."""
-        hash_md5 = hashlib.md5()
         with open(path, "rb") as f:
             for chunk in iter(lambda: f.read(64 * 1024), b""):
-                hash_md5.update(chunk)
-        return hash_md5.hexdigest()
+                hasher.update(chunk)
+        return hasher.hexdigest()
+
+    # Alias for smooth transition
+    calculate_md5 = staticmethod(lambda p: TarEntryFactory.calculate_checksum(p, "md5"))
 
     @staticmethod
     def inspect(
         path: Path, precomputed_stat: Optional[os.stat_result] = None
     ) -> DiskEntryStats:
-        """
-        Performs low-level lstat on the path, or uses a precomputed stat result
-        (e.g., from os.scandir) to avoid redundant syscalls.
-        """
+        """Performs low-level lstat on the path or uses precomputed stat result."""
         try:
             st = precomputed_stat if precomputed_stat else path.lstat()
-
-            # Extract only the permission bits (0o755, 0o644, etc.)
             permissions = stat_module.S_IMODE(st.st_mode)
 
-            # Identify the object type using the full st_mode
             is_dir = stat_module.S_ISDIR(st.st_mode)
             is_file = stat_module.S_ISREG(st.st_mode)
             is_symlink = stat_module.S_ISLNK(st.st_mode)
 
-            # Securely extract usernames/group names
             uname, gname = "", ""
             if pwd:
                 try:
@@ -536,28 +459,28 @@ class TarEntryFactory:
         rel_path: str,
         arcname: str,
         anonymize: bool = True,
-        calculate_hash: bool = False,
+        checksum_algorithm: Optional[str] = None,
         precomputed_stat: Optional[os.stat_result] = None,
         cache_manager: Optional["HashCacheManager"] = None,
     ) -> Optional[EntryMetadata]:
-        """
-        Analyzes a path and creates a TarEntry.
-        Accepts a precomputed_stat to avoid double stat syscalls during discovery.
+        """Analyzes a path and creates an EntryMetadata instance.
 
-        Returns None if the file is an unsupported type (Socket, Pipe, etc).
-        Raises OSError/FileNotFoundError if there are access issues.
+        Args:
+            source_path: Physical path on disk.
+            rel_path: Path relative to tape root.
+            arcname: Resolved TAR archive path.
+            anonymize: Whether to scrub local UID/GID.
+            checksum_algorithm: Algorithm to compute file hash ('sha256', 'md5', etc.), or None to skip.
+            precomputed_stat: Optional precomputed os.stat_result.
+            cache_manager: Optional HashCacheManager for caching.
         """
-
         path = Path(source_path)
         stats = cls.inspect(path, precomputed_stat=precomputed_stat)
 
         if not stats.exists or not (stats.is_dir or stats.is_file or stats.is_symlink):
             return None
 
-        # Determine link target for symlinks
         linkname = os.readlink(path) if stats.is_symlink else ""
-
-        # Directories and symlinks have 0 size in TAR headers
         effective_size = 0 if (stats.is_dir or stats.is_symlink) else stats.size
 
         uid = 0 if anonymize else stats.uid
@@ -565,17 +488,22 @@ class TarEntryFactory:
         uname = "root" if anonymize else stats.uname
         gname = "root" if anonymize else stats.gname
 
-        md5_value = None
-        if calculate_hash and stats.is_file:
+        checksum_value = None
+        if checksum_algorithm and stats.is_file:
+            algo = checksum_algorithm.lower()
             if cache_manager:
-                md5_value = cache_manager.get_hash(
-                    arcname, effective_size, int(stats.mtime)
+                checksum_value = cache_manager.get_checksum(
+                    arcname, effective_size, int(stats.mtime), algorithm=algo
                 )
-            if not md5_value:
-                md5_value = cls.calculate_md5(Path(source_path))
+            if not checksum_value:
+                checksum_value = cls.calculate_checksum(path, algorithm=algo)
                 if cache_manager:
-                    cache_manager.save_hash(
-                        arcname, effective_size, int(stats.mtime), md5_value
+                    cache_manager.save_checksum(
+                        arcname,
+                        effective_size,
+                        int(stats.mtime),
+                        checksum_value,
+                        algorithm=algo,
                     )
 
         final_mode = cls.normalize_mode(stats, anonymize)
@@ -593,32 +521,16 @@ class TarEntryFactory:
             is_dir=stats.is_dir,
             is_symlink=stats.is_symlink,
             linkname=linkname,
-            md5sum=md5_value,
+            checksum=checksum_value,
         )
 
     @staticmethod
     def normalize_mode(stats: DiskEntryStats, anonymize: bool) -> int:
-        """
-        Normalizes POSIX permissions to ensure cross-platform determinism.
-
-        Why: Windows emulates permissions as 0o666 (rw-rw-rw-) for most files,
-        while Linux typically uses 0o644 (rw-r--r--). This discrepancy breaks
-        the MD5 hash.
-        """
         if not anonymize:
             return stats.mode
-
         if stats.is_dir:
             return 0o755
-
         if stats.is_symlink:
             return 0o777
-
-        # 'Execution Intent' detection:
-        # Works by checking the executable bit (0o111) which Python emulates
-        # on Windows based on file extensions (.exe, .bat, etc.) and reads
-        # natively on Linux.
         is_executable = (stats.mode & 0o111) != 0
-
-        # We snap to a clean POSIX standard to eliminate environmental noise.
         return 0o755 if is_executable else 0o644

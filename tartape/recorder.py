@@ -24,8 +24,8 @@ logger = logging.getLogger(__name__)
 
 
 class TapeRecorder:
-    """
-    Scans a source directory and records an immutable T0 catalog snapshot.
+    """Scans a source directory and records an immutable T0 catalog snapshot.
+
     Builds the database in a temporary directory and seals it into a standalone
     .tartape sidecar file without modifying the source directory.
     """
@@ -36,14 +36,14 @@ class TapeRecorder:
         catalog_path: Optional[str | Path] = None,
         exclude: Optional[ExcludeType] = None,
         anonymize: bool = True,
-        calculate_hashes: bool = False,
+        checksum: str | bool = False,
         overwrite: bool = False,
         auto_truncate: bool = False,
     ):
         self.directory = Path(directory).resolve()
-        self.calculate_hashes = calculate_hashes
         self.auto_truncate = auto_truncate
         self.overwrite = overwrite
+        self.anonymize = anonymize
 
         if not self.directory.is_dir():
             raise ValueError(f"Root path '{directory}' must be a directory.")
@@ -63,11 +63,20 @@ class TapeRecorder:
             )
 
         self.exclude = DEFAULT_EXCLUDES if exclude is None else exclude
-        self.anonymize = anonymize
+
+        # Normalize unified checksum parameter
+        if isinstance(checksum, bool):
+            self.checksum_algorithm: Optional[str] = "sha256" if checksum else None
+        elif isinstance(checksum, str):
+            self.checksum_algorithm = checksum.lower().strip()
+        else:
+            self.checksum_algorithm = None
 
         self.cache: Optional[HashCacheManager] = None
-        if self.calculate_hashes:
-            logger.info("Pre-computing file hashes during recording.")
+        if self.checksum_algorithm:
+            logger.info(
+                f"Pre-computing file checksums using '{self.checksum_algorithm}' during recording."
+            )
             self.cache = HashCacheManager(self.directory)
 
         # Setup working database in isolated temporary directory
@@ -78,6 +87,7 @@ class TapeRecorder:
 
         self._buffer: list[Track] = []
         self._batch_size = 300
+        self._accumulated_data_size: int = 0
 
     def _calculate_fingerprint(self) -> str:
         """Generates the identity hash based on the contents of the database."""
@@ -87,9 +97,7 @@ class TapeRecorder:
         return sha.hexdigest()
 
     def _finalize_storage(self) -> None:
-        """
-        Seals the temporary SQLite file and moves it atomically to the final destination.
-        """
+        """Seals the temporary SQLite file and moves it atomically to the final destination."""
         self.catalog_path.parent.mkdir(parents=True, exist_ok=True)
 
         if self.catalog_path.exists() and self.overwrite:
@@ -102,8 +110,8 @@ class TapeRecorder:
         logger.info(f"Catalog successfully recorded at: {self.catalog_path}")
 
     def commit(self) -> str:
-        """
-        Freezes the tape state.
+        """Freezes the tape state.
+
         Calculates global stream offsets for each track, stores metadata,
         seals the database, and deploys the sidecar file.
 
@@ -149,15 +157,38 @@ class TapeRecorder:
                 fingerprint = self._calculate_fingerprint()
                 capture_time = str(int(time.time()))
 
+                # Core Metadata
                 TapeMetadata.insert(key="fingerprint", value=fingerprint).execute()
                 TapeMetadata.insert(key="total_size", value=total_size).execute()
                 TapeMetadata.insert(key="created_at", value=capture_time).execute()
                 TapeMetadata.insert(key="exclude_patterns", value=exclude_val).execute()
 
+                # Rich Inspection Metadata
+                TapeMetadata.insert(
+                    key="checksum_algorithm",
+                    value=self.checksum_algorithm or "none",
+                ).execute()
+                TapeMetadata.insert(
+                    key="has_file_checksums",
+                    value="true" if self.checksum_algorithm else "false",
+                ).execute()
+                TapeMetadata.insert(
+                    key="data_size",
+                    value=str(self._accumulated_data_size),
+                ).execute()
+                TapeMetadata.insert(
+                    key="auto_truncated",
+                    value="true" if self.auto_truncate else "false",
+                ).execute()
+                TapeMetadata.insert(
+                    key="is_anonymized",
+                    value="true" if self.anonymize else "false",
+                ).execute()
+
             # Close active Peewee session before sealing the database file
             self.temp_session.close()
 
-            # Seal the database to eliminate WAL/SHM artifacts
+            # Seal the database to eliminate lingering artifacts
             seal_database(self._temp_path)
 
             # Move sealed database to the catalog destination
@@ -263,12 +294,15 @@ class TapeRecorder:
             arcname=arcname,
             rel_path=rel_path,
             anonymize=self.anonymize,
-            calculate_hash=self.calculate_hashes,
+            checksum_algorithm=self.checksum_algorithm,
             precomputed_stat=precomputed_stat,
             cache_manager=self.cache,
         )
 
         if metadata:
+            if metadata.has_content:
+                self._accumulated_data_size += metadata.size
+
             track = Track(
                 arc_path=metadata.arc_path,
                 rel_path=metadata.rel_path,
@@ -282,7 +316,7 @@ class TapeRecorder:
                 is_dir=metadata.is_dir,
                 is_symlink=metadata.is_symlink,
                 linkname=metadata.linkname,
-                md5sum=metadata.md5sum,
+                checksum=metadata.checksum,
             )
 
             self._buffer.append(track)

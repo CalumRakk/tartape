@@ -48,3 +48,11 @@ class AmbiguousLayoutError(TarTapeError, ValueError):
 
 class VolumeNotFoundError(TarTapeError, KeyError):
     """Exception raised when a volume index does not exist in a layout."""
+
+
+class SourceNotFoundError(TarTapeError, FileNotFoundError):
+    """Exception raised when source files are required for an operation but not found on disk."""
+
+
+class ReadOnlyCatalogError(TarTapeError, PermissionError):
+    """Exception raised when attempting to modify a catalog opened in read-only mode."""

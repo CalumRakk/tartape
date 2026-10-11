@@ -14,7 +14,8 @@ class TestFolderVolumeStress(TarTapeTestCase):
         self.create_file("file_a.bin", "A" * 5000)
         self.create_file("file_b.bin", "B" * 5000)
 
-        recorder = TapeRecorder(self.data_dir)
+        # Record with explicit MD5 to validate MD5 volume workflows
+        recorder = TapeRecorder(self.data_dir, checksum="md5")
         recorder.commit()
         self.tape = Tape(self.data_dir)
 
@@ -34,18 +35,19 @@ class TestFolderVolumeStress(TarTapeTestCase):
             volume.seek(0)
             self.assertEqual(volume.tell(), 0)
 
-            self.assertFalse(volume._integrity_broken)  # type: ignore
+            self.assertFalse(volume._integrity_broken)
 
             content = volume.read()
             expected_md5 = hashlib.md5(content).hexdigest()
 
+            self.assertEqual(volume.checksum, expected_md5)
             self.assertEqual(volume.md5sum, expected_md5)
-            self.assertFalse(volume._integrity_broken)  # type: ignore
+            self.assertFalse(volume._integrity_broken)
 
     def test_volume_non_linear_md5_fallback(self):
         """
-        Non-linear jumps that break the hash cursor.
-        The volume must correctly fallback to manual calculation.
+        Non-linear jumps break the in-flight hash cursor.
+        The volume must return None for .checksum and require explicit compute_checksum().
         """
         vol_size = 4096
         volume = list(self.tape.iter_volumes(size=vol_size))[0]
@@ -55,9 +57,14 @@ class TestFolderVolumeStress(TarTapeTestCase):
             volume.seek(500)
             part2 = volume.read(100)
 
-            self.assertTrue(volume._integrity_broken)  # type: ignore
+            self.assertTrue(volume._integrity_broken)
 
-            actual_md5 = volume.md5sum
+            # In the new design, .checksum/.md5sum is strictly passive: returns None on broken stream
+            self.assertIsNone(volume.checksum)
+            self.assertIsNone(volume.md5sum)
+
+            # Calling compute_checksum explicitly computes it from source
+            actual_md5 = volume.compute_checksum(algorithm="md5")
 
             volume.seek(0)
             full_content = volume.read()
@@ -66,32 +73,35 @@ class TestFolderVolumeStress(TarTapeTestCase):
             self.assertEqual(
                 actual_md5,
                 expected_md5,
-                "Manual fallback MD5 does not match real content",
+                "Explicit compute_checksum does not match real content",
             )
 
     def test_manual_calculation_boundary_limit(self):
         """
-        Verify the fix for the 'overflow' bug in _calculate_manually.
-        The manual MD5 must NOT include data from subsequent volumes.
+        Verify compute_checksum does NOT leak data from subsequent volumes.
         """
         vol_size = 1024
         volumes = list(self.tape.iter_volumes(size=vol_size))
         vol1 = volumes[0]
-        vol2 = volumes[1]
 
         with vol1:
             vol1.seek(10)
             vol1.read(10)
-            md5_manual = vol1.md5sum
+
+            # Stream was not fully read linearly, so .checksum is None
+            self.assertIsNone(vol1.checksum)
+
+            # Explicit computation must be scoped strictly to the volume window
+            md5_computed = vol1.compute_checksum(algorithm="md5")
 
             vol1.seek(0)
             content_linear = vol1.read()
             md5_linear = hashlib.md5(content_linear).hexdigest()
 
             self.assertEqual(
-                md5_manual,
+                md5_computed,
                 md5_linear,
-                "Manual MD5 leaked data from outside the volume window",
+                "Explicit checksum leaked data from outside the volume window",
             )
             self.assertEqual(len(content_linear), vol_size)
 

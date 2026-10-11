@@ -40,12 +40,14 @@ class TestDatabaseAndModels(unittest.TestCase):
                 start_offset=0,
                 end_offset=1024**3,
                 size=1024**3,
-                md5sum="abc123md5",
+                checksum="abc123md5",
+                checksum_algorithm="md5",
             )
             vol = VolumeRecord.get(
                 (VolumeRecord.layout_tag == "s3") & (VolumeRecord.volume_index == 0)
             )
             self.assertEqual(vol.name, "backup.tar.001")
+            self.assertEqual(vol.checksum, "abc123md5")
             self.assertEqual(vol.md5sum, "abc123md5")
 
     def test_seal_database_eliminates_wal(self):
@@ -228,7 +230,9 @@ class TestCatalogAndGPS(unittest.TestCase):
 
                 # Persist MD5 directly in DB for verification test
                 with catalog.db_session:
-                    VolumeRecord.update(md5sum=expected_hash).where(
+                    VolumeRecord.update(
+                        checksum=expected_hash, checksum_algorithm="md5"
+                    ).where(
                         (VolumeRecord.layout_tag == "test_layout")
                         & (VolumeRecord.volume_index == 0)
                     ).execute()

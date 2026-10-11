@@ -47,11 +47,20 @@ class Track(BaseModel):
     is_dir = cast(bool, BooleanField(default=False))
     is_symlink = cast(bool, BooleanField(default=False))
     linkname = cast(str, CharField(null=True))
-    md5sum = cast(Optional[str], CharField(null=True))
+    checksum = cast(Optional[str], CharField(null=True))
 
     # The Global Window (Tape Coordinates)
     start_offset = cast(int, IntegerField(null=True))
     end_offset = cast(int, IntegerField(null=True))
+
+    @property
+    def md5sum(self) -> Optional[str]:
+        """Legacy compatibility alias for checksum."""
+        return self.checksum
+
+    @md5sum.setter
+    def md5sum(self, value: Optional[str]) -> None:
+        self.checksum = value
 
     @property
     def is_file(self) -> bool:
@@ -69,7 +78,6 @@ class Track(BaseModel):
 
     @property
     def total_block_size(self) -> int:
-        """Required by the Recorder to calculate the next offset."""
         content_size = self.size if self.has_content else 0
         return TAR_BLOCK_SIZE + content_size + self.padding_size
 
@@ -88,7 +96,7 @@ class Track(BaseModel):
             is_dir=self.is_dir,
             is_symlink=self.is_symlink,
             linkname=self.linkname or "",
-            md5sum=self.md5sum,
+            checksum=self.checksum,
         )
 
 
@@ -118,7 +126,17 @@ class VolumeRecord(BaseModel):
     start_offset = cast(int, IntegerField())
     end_offset = cast(int, IntegerField())
     size = cast(int, IntegerField())
-    md5sum = cast(Optional[str], CharField(null=True))
+    checksum = cast(Optional[str], CharField(null=True))
+    checksum_algorithm = cast(Optional[str], CharField(null=True))
+
+    @property
+    def md5sum(self) -> Optional[str]:
+        """Legacy compatibility alias for checksum."""
+        return self.checksum
+
+    @md5sum.setter
+    def md5sum(self, value: Optional[str]) -> None:
+        self.checksum = value
 
     class Meta:  # type: ignore
         table_name = "volumes"
