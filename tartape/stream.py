@@ -2,7 +2,7 @@ import hashlib
 import io
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Generator, Iterable, Optional
+from typing import TYPE_CHECKING, Callable, Generator, Iterable, Optional, Self
 
 if TYPE_CHECKING:
     from tartape.tape import Tape
@@ -438,6 +438,7 @@ class Volume(io.BufferedIOBase):
         total_volumes: Optional[int] = None,
         catalog_path: Optional[Path] = None,
         checksum_algorithm: Optional[str] = "sha256",
+        observer: Optional[TarObserver] = None,
     ):
         self.directory = Path(directory)
         self.manifest = manifest
@@ -452,6 +453,7 @@ class Volume(io.BufferedIOBase):
         self.checksum_algorithm = (
             checksum_algorithm.lower() if checksum_algorithm else None
         )
+        self._observer = observer
 
         # Streaming state
         self._stream_gen = None
@@ -464,6 +466,16 @@ class Volume(io.BufferedIOBase):
         self._hash_cursor = 0
         self._integrity_broken = False
         self._final_checksum: Optional[str] = None
+
+    @property
+    def observer(self) -> Optional[TarObserver]:
+        """Return the active TarObserver instance, if attached."""
+        return self._observer
+
+    @observer.setter
+    def observer(self, value: Optional[TarObserver]) -> None:
+        """Attach or update the TarObserver for live telemetry."""
+        self._observer = value
 
     def __repr__(self) -> str:
         return f"<Volume #{self.index} '{self.name}' ({self.size} bytes)>"
@@ -513,8 +525,11 @@ class Volume(io.BufferedIOBase):
             total_tape_size=self.manifest.total_size,
             checksum_algorithm=self.checksum_algorithm,
         )
-        # Consume raw byte chunks directly (bypassing event wrappers)
-        self._stream_gen = engine.stream_bytes(start_offset=global_target)
+        # Forward self._observer to emit in-band file telemetry during streaming
+        self._stream_gen = engine.stream_bytes(
+            start_offset=global_target,
+            observer=self._observer,
+        )
 
     def _persist_checksum(self, checksum_val: str) -> None:
         """Safely persist calculated checksum to the catalog database."""
@@ -759,6 +774,233 @@ class Volume(io.BufferedIOBase):
 
     def readable(self) -> bool:
         return True
+
+
+class FileSliceStream(io.BufferedIOBase):
+    """File-like wrapper exposing a discrete [start_offset, end_offset) slice of a regular file.
+
+    Provides passive in-flight hashing (e.g., SHA-256 or MD5) during linear sequential
+    reads without requiring a second disk pass.
+    """
+
+    def __init__(
+        self,
+        path: Path | str,
+        start_offset: int,
+        end_offset: int,
+        checksum_algorithm: Optional[str] = "sha256",
+        name: Optional[str] = None,
+    ):
+        self.path = Path(path).resolve()
+        if start_offset < 0:
+            raise ValueError(f"start_offset cannot be negative: {start_offset}")
+        if end_offset < start_offset:
+            raise ValueError(
+                f"end_offset ({end_offset}) must be >= start_offset ({start_offset})"
+            )
+
+        self.start_offset = start_offset
+        self.end_offset = end_offset
+        self.size = end_offset - start_offset
+        self.name = name or f"{self.path.name}[{start_offset}:{end_offset}]"
+        self.checksum_algorithm = (
+            checksum_algorithm.lower() if checksum_algorithm else None
+        )
+
+        if (
+            self.checksum_algorithm
+            and self.checksum_algorithm not in SUPPORTED_CHECKSUM_ALGORITHMS
+        ):
+            valid_algos = ", ".join(f"'{a}'" for a in SUPPORTED_CHECKSUM_ALGORITHMS)
+            raise ValueError(
+                f"Unsupported checksum algorithm '{checksum_algorithm}'. Supported: {valid_algos}."
+            )
+
+        self._file: Optional[io.BufferedReader] = None
+        self._position = 0
+        self._closed = True
+
+        # In-flight hashing state
+        self._hasher = None
+        self._hash_cursor = 0
+        self._integrity_broken = False
+        self._final_checksum: Optional[str] = None
+
+    def __repr__(self) -> str:
+        return (
+            f"<FileSliceStream '{self.name}' ({self.size} bytes) "
+            f"offset={self.start_offset}-{self.end_offset}>"
+        )
+
+    def _ensure_open(self) -> None:
+        if self._closed or self._file is None:
+            raise VolumeStateError(
+                f"I/O operation on closed FileSliceStream '{self.name}'."
+            )
+
+    def _init_hasher(self) -> None:
+        if not self.checksum_algorithm:
+            self._hasher = None
+            return
+        try:
+            self._hasher = hashlib.new(self.checksum_algorithm)
+        except ValueError:
+            self._hasher = hashlib.new(self.checksum_algorithm, usedforsecurity=False)
+
+    def open(self) -> "FileSliceStream":
+        return self.__enter__()
+
+    def close(self) -> None:
+        self.__exit__(None, None, None)
+
+    def __enter__(self) -> Self:
+        if self._closed:
+            if not self.path.is_file():
+                raise SourceNotFoundError(f"Source file not found at: '{self.path}'")
+
+            raw_f = open(self.path, "rb")
+            raw_f.seek(self.start_offset)
+            self._file = raw_f
+            self._position = 0
+            self._init_hasher()
+            self._hash_cursor = 0
+            self._integrity_broken = False
+            self._final_checksum = None
+            self._closed = False
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        if not self._closed and self._file:
+            self._file.close()
+            self._file = None
+            self._closed = True
+
+        if (
+            not self._integrity_broken
+            and self._hash_cursor == self.size
+            and self._hasher is not None
+        ) and not self._final_checksum:
+            self._final_checksum = self._hasher.hexdigest()
+
+    def read(self, size: int = -1) -> bytes:  # type: ignore
+        self._ensure_open()
+        if self._position >= self.size:
+            return b""
+
+        assert self._file is not None
+        remaining = self.size - self._position
+        bytes_to_read = (
+            remaining if (size is None or size < 0) else min(size, remaining)
+        )
+
+        chunk = self._file.read(bytes_to_read)
+        if not chunk:
+            return b""
+
+        # In-flight hash computation tracking linear reads
+        if not self._integrity_broken and self._hasher is not None:
+            if self._position == self._hash_cursor:
+                self._hasher.update(chunk)
+                self._hash_cursor += len(chunk)
+            else:
+                self._integrity_broken = True
+
+        self._position += len(chunk)
+        return chunk
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        self._ensure_open()
+        assert self._file is not None
+
+        if whence == io.SEEK_SET:
+            target = offset
+        elif whence == io.SEEK_CUR:
+            target = self._position + offset
+        elif whence == io.SEEK_END:
+            target = self.size + offset
+        else:
+            raise ValueError(f"Invalid whence: {whence}")
+
+        if target < 0 or target > self.size:
+            raise InvalidOffsetError(
+                f"Seek position {target} out of slice bounds (0-{self.size})"
+            )
+
+        if target == self._position:
+            return self._position
+
+        # Detect non-linear jumps to flag in-flight hash invalidation
+        if target != self._hash_cursor:
+            self._integrity_broken = True
+
+        self._file.seek(self.start_offset + target)
+        self._position = target
+        return self._position
+
+    def tell(self) -> int:
+        self._ensure_open()
+        return self._position
+
+    def seekable(self) -> bool:
+        return True
+
+    def readable(self) -> bool:
+        return True
+
+    @property
+    def is_completed(self) -> bool:
+        return self._position == self.size
+
+    @property
+    def checksum(self) -> Optional[str]:
+        """Return computed checksum if read linearly to completion. Does not perform extra I/O."""
+        if self._final_checksum:
+            return self._final_checksum
+
+        if (
+            not self._integrity_broken
+            and self._hash_cursor == self.size
+            and self._hasher is not None
+        ):
+            self._final_checksum = self._hasher.hexdigest()
+            return self._final_checksum
+        return None
+
+    @property
+    def md5sum(self) -> Optional[str]:
+        """Legacy compatibility alias for checksum."""
+        return self.checksum
+
+    def compute_checksum(
+        self, algorithm: Optional[ChecksumAlgorithm | str] = None
+    ) -> str:
+        """Explicitly compute the slice checksum by reading the segment from disk."""
+        algo = (algorithm or self.checksum_algorithm or "sha256").lower()
+        if algo not in SUPPORTED_CHECKSUM_ALGORITHMS:
+            valid_algos = ", ".join(f"'{a}'" for a in SUPPORTED_CHECKSUM_ALGORITHMS)
+            raise ValueError(
+                f"Unsupported checksum algorithm '{algo}'. Supported: {valid_algos}."
+            )
+
+        try:
+            hasher = hashlib.new(algo)
+        except ValueError:
+            hasher = hashlib.new(algo, usedforsecurity=False)
+
+        with open(self.path, "rb") as f:
+            f.seek(self.start_offset)
+            bytes_left = self.size
+            while bytes_left > 0:
+                chunk = f.read(min(bytes_left, 64 * 1024))
+                if not chunk:
+                    break
+                hasher.update(chunk)
+                bytes_left -= len(chunk)
+
+        digest = hasher.hexdigest()
+        self._final_checksum = digest
+        self.checksum_algorithm = algo
+        return digest
 
 
 # Legacy aliases for backwards compatibility

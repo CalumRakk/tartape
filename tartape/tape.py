@@ -30,6 +30,7 @@ from tartape.schemas import (
     ManifestEntry,
     TarEvent,
     TarObserver,
+    TrackGPS,
     VerificationReport,
 )
 from tartape.stream import (
@@ -342,6 +343,7 @@ class Tape(os.PathLike):
         tag: Optional[str] = None,
         is_default: bool = True,
         naming_template: Optional[str] = None,
+        observer: Optional[TarObserver] = None,
     ) -> Generator[Volume, None, None]:
         """Partition the tape into logical volumes and register the layout in the catalog."""
         with self._get_catalog() as cat:
@@ -370,6 +372,7 @@ class Tape(os.PathLike):
                     total_volumes=layout.total_volumes,
                     catalog_path=cat.path,
                     checksum_algorithm=self.checksum_algorithm or "sha256",
+                    observer=observer,
                 )
                 yield volume
 
@@ -431,8 +434,9 @@ class Tape(os.PathLike):
         tag: Optional[str] = None,
         vol_start: int | None = None,
         vol_end: int | None = None,
+        observer: Optional[TarObserver] = None,
     ) -> TapeVolume:
-        """Retrieve a specific volume by index or legacy parameters."""
+        """Retrieve a specific volume by index or parameters."""
         cat = self._get_catalog()
         if not cat.path.exists():
             raise TapeNotFoundError(f"The tape catalog does not exist at: {cat.path}")
@@ -458,6 +462,7 @@ class Tape(os.PathLike):
                 manifest,
                 vol_name,
                 checksum_algorithm=self.checksum_algorithm or "sha256",
+                observer=observer,
             )
 
         vol_index = int(index)
@@ -489,6 +494,7 @@ class Tape(os.PathLike):
                 total_volumes=layout.total_volumes,
                 catalog_path=cat.path,
                 checksum_algorithm=self.checksum_algorithm or "sha256",
+                observer=observer,
             )
 
     def get_file_slices(self, arc_path: str, chunk_size: int) -> list[FileSlice]:
@@ -498,3 +504,23 @@ class Tape(os.PathLike):
     def get_file_slices_map(self, chunk_size: int) -> dict[str, list[FileSlice]]:
         chunker = TarChunker(chunk_size=chunk_size)
         return chunker.get_file_slices_map(self.directory)
+
+    def iter_gps(
+        self, tag_or_size: Optional[str | int] = None
+    ) -> Generator[TrackGPS, None, None]:
+        """Stream all track GPS coordinates using the default layout or an explicitly specified layout."""
+        cat = self._get_catalog()
+        with cat:
+            yield from cat.iter_gps(tag_or_size=tag_or_size)
+
+    def export_catalog(self, compress: bool = True) -> bytes:
+        """Export the tape's sidecar catalog as raw or gzip-compressed bytes.
+
+        Args:
+            compress: If True, compresses the database payload using gzip.
+
+        Returns:
+            bytes: Binary SQLite database content.
+        """
+        cat = self._get_catalog()
+        return cat.export_bytes(compress=compress)

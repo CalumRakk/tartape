@@ -1,6 +1,9 @@
+import gzip
 import hashlib
 import json
 import logging
+import tempfile
+from collections.abc import Generator
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -13,7 +16,7 @@ from tartape.exceptions import (
     VolumeNotFoundError,
 )
 from tartape.models import LayoutRecord, TapeMetadata, Track, VolumeRecord
-from tartape.schemas import FileGPS, FileSlice
+from tartape.schemas import FileGPS, FileSlice, TrackGPS
 from tartape.units import format_size, parse_size
 
 from .database import DatabaseSession
@@ -243,6 +246,60 @@ class Layout:
 
         return hasher.hexdigest() == vol_record.checksum
 
+    def iter_gps(self) -> Generator["TrackGPS", None, None]:
+        """Iterate through all recorded tracks and compute their GPS slices in this layout.
+
+        Uses O(1) arithmetic based on global track offsets and volume boundaries.
+        Operates in a single streaming SQL query without loading all records into memory.
+
+        Yields:
+            TrackGPS: Track metadata along with its computed FileSlice fragments.
+        """
+
+        with self._session:
+            query = Track.select().order_by(Track.start_offset).iterator()
+
+            for track in query:
+                content_size = track.size if track.has_content else 0
+                fragments: list[FileSlice] = []
+
+                if content_size > 0 and track.start_offset is not None:
+                    content_global_start = track.start_offset + TAR_BLOCK_SIZE
+                    content_global_end = content_global_start + content_size
+
+                    first_vol = content_global_start // self.volume_size
+                    last_vol = (content_global_end - 1) // self.volume_size
+
+                    for vol_idx in range(first_vol, last_vol + 1):
+                        vol_start = vol_idx * self.volume_size
+                        vol_end = vol_start + self.volume_size
+
+                        overlap_start = max(content_global_start, vol_start)
+                        overlap_end = min(content_global_end, vol_end)
+
+                        if overlap_start < overlap_end:
+                            fragments.append(
+                                FileSlice(
+                                    volume_index=vol_idx,
+                                    volume_offset=overlap_start - vol_start,
+                                    volume_length=overlap_end - overlap_start,
+                                    source_offset=overlap_start - content_global_start,
+                                )
+                            )
+
+                yield TrackGPS(
+                    arc_path=track.arc_path,
+                    rel_path=track.rel_path,
+                    size=track.size,
+                    mtime=track.mtime,
+                    mode=track.mode,
+                    checksum=track.checksum,
+                    is_dir=track.is_dir,
+                    is_symlink=track.is_symlink,
+                    linkname=track.linkname or "",
+                    fragments=fragments,
+                )
+
 
 class Catalog:
     """Standalone, zero-disk interface to a .tartape sidecar catalog.
@@ -251,6 +308,8 @@ class Catalog:
     """
 
     def __init__(self, db_path: str | Path, read_only: bool = False):
+        self._temp_dir_holder: Optional[tempfile.TemporaryDirectory] = None
+
         if str(db_path) == ":memory:":
             self.path = Path(":memory:")
             self.db_session = DatabaseSession(":memory:", read_only=read_only)
@@ -573,6 +632,9 @@ class Catalog:
     def close(self):
         """Forcefully close the catalog database session and perform cleanup."""
         self.db_session.close()
+        if self._temp_dir_holder is not None:
+            self._temp_dir_holder.cleanup()
+            self._temp_dir_holder = None
 
     def __enter__(self):
         self.db_session.__enter__()
@@ -589,3 +651,82 @@ class Catalog:
         if not db_path:
             raise TapeNotFoundError(f"TarTape catalog not found for: {directory}")
         return cls(db_path)
+
+    def iter_gps(
+        self, tag_or_size: Optional[str | int] = None
+    ) -> Generator["TrackGPS", None, None]:
+        """Stream all track GPS coordinates using the default layout or an explicitly specified layout."""
+        layout = (
+            self.get_layout(tag_or_size)
+            if tag_or_size is not None
+            else self.default_layout
+        )
+        yield from layout.iter_gps()
+
+    def export_bytes(self, compress: bool = True) -> bytes:
+        """Export the catalog database as raw or gzip-compressed bytes.
+
+        Ensures any open sessions are checkpointed before reading.
+
+        Args:
+            compress: If True, compresses output bytes using gzip (level 6).
+
+        Returns:
+            bytes: The binary SQLite catalog payload.
+        """
+        self.close()
+
+        if str(self.path) == ":memory:":
+            # In-memory export fallback
+            raise NotImplementedError(
+                "Direct export of in-memory catalogs is not supported yet."
+            )
+
+        with open(self.path, "rb") as f:
+            raw_bytes = f.read()
+
+        if compress:
+            return gzip.compress(raw_bytes, compresslevel=6)
+        return raw_bytes
+
+    @classmethod
+    def from_bytes(
+        cls,
+        data: bytes,
+        target_path: Optional[str | Path] = None,
+        read_only: bool = True,
+    ) -> "Catalog":
+        """Reconstruct a functional Catalog instance from raw or compressed bytes.
+
+        Automatically detects gzip compression header. If target_path is not
+        provided, an isolated temporary database file is managed for the
+        lifetime of the returned Catalog instance.
+
+        Args:
+            data: Binary catalog data (raw SQLite or gzip-compressed).
+            target_path: Optional destination path to persist the SQLite file.
+            read_only: If True, opens the catalog in read-only mode.
+
+        Returns:
+            Catalog: An initialized Catalog instance.
+        """
+        # Auto-detect gzip magic bytes (0x1f, 0x8b)
+        if len(data) >= 2 and data[:2] == b"\x1f\x8b":
+            raw_bytes = gzip.decompress(data)
+        else:
+            raw_bytes = data
+
+        if target_path is not None:
+            dest = Path(target_path).resolve()
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(raw_bytes)
+            return cls(dest, read_only=read_only)
+
+        # Create managed temporary file
+        temp_dir = tempfile.TemporaryDirectory()
+        temp_file = Path(temp_dir.name) / "ephemeral.tartape"
+        temp_file.write_bytes(raw_bytes)
+
+        instance = cls(temp_file, read_only=read_only)
+        instance._temp_dir_holder = temp_dir
+        return instance

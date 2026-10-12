@@ -1,12 +1,14 @@
 """TarTape: Deterministic, streaming TAR archive engine."""
 
-__version__ = "3.0.0"
+__version__ = "3.0.1"
 __copyright__ = "Copyright (C) 2026-present CalumRakk <https://github.com/CalumRakk>"
 __license__ = "MIT"
 
 
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Generator, Optional
 
 from tartape.catalog import Catalog, Layout
 from tartape.constants import TAPE_DB_NAME, TAPE_EXTENSION, TAPE_METADATA_DIR
@@ -42,9 +44,10 @@ from tartape.schemas import (
     TarFileStartEvent,
     TarObserver,
     TarTapeCompletedEvent,
+    TrackGPS,
     VerificationReport,
 )
-from tartape.stream import TapeStreamReader, Volume
+from tartape.stream import FileSliceStream, TapeStreamReader, Volume
 from tartape.tape import Tape
 from tartape.units import format_size, parse_size
 
@@ -161,6 +164,50 @@ def discover(directory: str | Path) -> Optional[Path]:
     return None
 
 
+@contextmanager
+def record_ephemeral(
+    directory: str | Path,
+    exclude: Optional[ExcludeType] = None,
+    anonymize: bool = True,
+    checksum: ChecksumOption = False,
+    auto_truncate: bool = False,
+) -> Generator[Tape, None, None]:
+    """Record an ephemeral tape snapshot in a temporary directory, cleaned up on exit.
+
+    Ideal for streaming or backup pipelines (such as toTelegram) that ingest
+    metadata into external databases or export catalog blobs without leaving
+    sidecar files on the target filesystem.
+
+    Args:
+        directory: The root directory to scan and record.
+        exclude: Patterns or callable to skip specific files or directories.
+        anonymize: If True, scrubs UID/GID and sets ownership to 'root'.
+        checksum: Checksum configuration ('sha256', 'md5', or boolean).
+        auto_truncate: If True, automatically shortens path components > 100 bytes.
+
+    Yields:
+        Tape: An initialized Tape instance pointing to the temporary catalog.
+    """
+    temp_dir = tempfile.TemporaryDirectory()
+    temp_catalog = Path(temp_dir.name) / f"{Path(directory).name}{TAPE_EXTENSION}"
+    tape: Optional[Tape] = None
+    try:
+        tape = record(
+            directory=directory,
+            catalog_path=temp_catalog,
+            exclude=exclude,
+            anonymize=anonymize,
+            checksum=checksum,
+            overwrite=True,
+            auto_truncate=auto_truncate,
+        )
+        yield tape
+    finally:
+        if tape is not None:
+            tape.close()
+        temp_dir.cleanup()
+
+
 create = record
 
 __all__ = [
@@ -171,6 +218,7 @@ __all__ = [
     "Discrepancy",
     "FileGPS",
     "FileSlice",
+    "FileSliceStream",
     "InvalidOffsetError",
     "Layout",
     "LayoutNotFoundError",
@@ -192,6 +240,7 @@ __all__ = [
     "TarObserver",
     "TarTapeCompletedEvent",
     "TarTapeError",
+    "TrackGPS",
     "VerificationReport",
     "Volume",
     "VolumeChecksumMismatchError",
@@ -205,4 +254,5 @@ __all__ = [
     "open_catalog",
     "parse_size",
     "record",
+    "record_ephemeral",
 ]

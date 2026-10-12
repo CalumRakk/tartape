@@ -237,6 +237,37 @@ class FileGPS:
 
 
 @dataclass(frozen=True)
+class TrackGPS:
+    """Surgical location coordinates and metadata for a catalog track in a layout."""
+
+    arc_path: str
+    rel_path: str
+    size: int
+    mtime: int
+    mode: int
+    checksum: Optional[str]
+    is_dir: bool
+    is_symlink: bool
+    linkname: str
+    fragments: list[FileSlice]
+
+    @property
+    def md5sum(self) -> Optional[str]:
+        """Legacy compatibility alias for checksum."""
+        return self.checksum
+
+    @property
+    def spans_multiple_volumes(self) -> bool:
+        """Return True if content is split across more than one volume."""
+        return len(self.fragments) > 1
+
+    @property
+    def primary_volume_index(self) -> Optional[int]:
+        """Return the volume index of the first fragment, or None if empty."""
+        return self.fragments[0].volume_index if self.fragments else None
+
+
+@dataclass(frozen=True)
 class ManifestEntry:
     info: EntryMetadata
     state: EntryState
