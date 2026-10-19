@@ -34,6 +34,13 @@ class ChainedVolumeStream(io.RawIOBase):
         self._advance()
 
     def _advance(self) -> None:
+        # Close the exhausted stream before moving to the next
+        if self._current is not None and hasattr(self._current, "close"):
+            try:
+                self._current.close()
+            except Exception:
+                pass
+
         try:
             self._current = next(self._stream_iter)
         except StopIteration:

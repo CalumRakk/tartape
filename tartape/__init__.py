@@ -1,6 +1,6 @@
 """TarTape: Deterministic, streaming TAR archive engine."""
 
-__version__ = "3.0.1"
+__version__ = "3.0.2"
 __copyright__ = "Copyright (C) 2026-present CalumRakk <https://github.com/CalumRakk>"
 __license__ = "MIT"
 

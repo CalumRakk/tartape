@@ -897,13 +897,20 @@ class FileSliceStream(io.BufferedIOBase):
         if not chunk:
             return b""
 
-        # In-flight hash computation tracking linear reads
+        # In-flight hash update supporting linear reads and overlapping retry chunks
         if not self._integrity_broken and self._hasher is not None:
-            if self._position == self._hash_cursor:
+            start_pos = self._position
+            end_pos = start_pos + len(chunk)
+
+            if start_pos == self._hash_cursor:
                 self._hasher.update(chunk)
-                self._hash_cursor += len(chunk)
-            else:
-                self._integrity_broken = True
+                self._hash_cursor = end_pos
+            elif end_pos > self._hash_cursor:
+                # Overlapping retry: feed only unseen bytes beyond hash cursor
+                offset_in_chunk = max(0, self._hash_cursor - start_pos)
+                new_bytes = chunk[offset_in_chunk:]
+                self._hasher.update(new_bytes)
+                self._hash_cursor = end_pos
 
         self._position += len(chunk)
         return chunk
@@ -929,9 +936,17 @@ class FileSliceStream(io.BufferedIOBase):
         if target == self._position:
             return self._position
 
-        # Detect non-linear jumps to flag in-flight hash invalidation
-        if target != self._hash_cursor:
+        # Resilient seeking state tracking
+        if target == 0:
+            # Rewinding to start resets in-flight hasher (the curious reader pattern)
+            self._init_hasher()
+            self._hash_cursor = 0
+            self._integrity_broken = False
+        elif target > self._hash_cursor:
+            # Forward gap: skipped unread bytes break in-flight integrity
             self._integrity_broken = True
+        # Note: target < self._hash_cursor is an overlapping seek/retry;
+        # read() will filter already-hashed bytes without breaking integrity.
 
         self._file.seek(self.start_offset + target)
         self._position = target
