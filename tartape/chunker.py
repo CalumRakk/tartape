@@ -1,6 +1,6 @@
 import logging
 from pathlib import Path
-from typing import Generator, Iterable, Optional, Tuple, cast
+from typing import Generator, Iterable, Optional, cast
 
 from tartape.catalog import Catalog
 from tartape.constants import TAR_BLOCK_SIZE
@@ -31,6 +31,54 @@ def calculate_segments(
     for start in range(0, total_size, chunk_size):
         end = min(start + chunk_size, total_size)
         yield start, end
+
+
+def calculate_file_slices(
+    start_offset: int,
+    file_size: int,
+    volume_size: int,
+) -> list[FileSlice]:
+    """Calculate exact FileSlice fragments for an entry within a volume layout.
+
+    Encapsulates internal TAR block alignment (512-byte header) and volume boundaries
+    using O(1) arithmetic.
+
+    Args:
+        start_offset: Global byte offset where the TAR entry (header) begins.
+        file_size: Actual uncompressed file content size in bytes.
+        volume_size: Slicing chunk size in bytes for each volume.
+
+    Returns:
+        list[FileSlice]: Ordered slices needed to locate the file content across volumes.
+    """
+    if file_size <= 0 or volume_size <= 0:
+        return []
+
+    content_global_start = start_offset + TAR_BLOCK_SIZE
+    content_global_end = content_global_start + file_size
+
+    first_vol = content_global_start // volume_size
+    last_vol = (content_global_end - 1) // volume_size
+
+    fragments: list[FileSlice] = []
+    for vol_idx in range(first_vol, last_vol + 1):
+        vol_start = vol_idx * volume_size
+        vol_end = vol_start + volume_size
+
+        overlap_start = max(content_global_start, vol_start)
+        overlap_end = min(content_global_end, vol_end)
+
+        if overlap_start < overlap_end:
+            fragments.append(
+                FileSlice(
+                    volume_index=vol_idx,
+                    volume_offset=overlap_start - vol_start,
+                    volume_length=overlap_end - overlap_start,
+                    source_offset=overlap_start - content_global_start,
+                )
+            )
+
+    return fragments
 
 
 class TarChunker:

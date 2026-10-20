@@ -1,6 +1,6 @@
 """TarTape: Deterministic, streaming TAR archive engine."""
 
-__version__ = "3.0.2"
+__version__ = "3.0.3"
 __copyright__ = "Copyright (C) 2026-present CalumRakk <https://github.com/CalumRakk>"
 __license__ = "MIT"
 
@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Generator, Optional
 
 from tartape.catalog import Catalog, Layout
+from tartape.chunker import calculate_file_slices, calculate_segments
 from tartape.constants import TAPE_DB_NAME, TAPE_EXTENSION, TAPE_METADATA_DIR
 from tartape.exceptions import (
     AmbiguousLayoutError,
@@ -246,6 +247,8 @@ __all__ = [
     "VolumeChecksumMismatchError",
     "VolumeNotFoundError",
     "VolumeStateError",
+    "calculate_file_slices",
+    "calculate_segments",
     "create",
     "discover",
     "exists",

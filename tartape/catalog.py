@@ -182,6 +182,8 @@ class Layout:
 
         Uses O(1) arithmetic based on global track offsets and volume boundaries.
         """
+        from tartape.chunker import calculate_file_slices
+
         with self._session:
             try:
                 track = Track.get(Track.arc_path == arc_path)
@@ -192,30 +194,11 @@ class Layout:
             if content_size == 0 or track.start_offset is None:
                 return FileGPS(arc_path=arc_path, file_size=0, fragments=[])
 
-            # In the TAR stream, data starts immediately after the 512-byte header
-            content_global_start = track.start_offset + TAR_BLOCK_SIZE
-            content_global_end = content_global_start + content_size
-
-            first_vol = content_global_start // self.volume_size
-            last_vol = (content_global_end - 1) // self.volume_size
-
-            fragments: list[FileSlice] = []
-            for vol_idx in range(first_vol, last_vol + 1):
-                vol_start = vol_idx * self.volume_size
-                vol_end = vol_start + self.volume_size
-
-                overlap_start = max(content_global_start, vol_start)
-                overlap_end = min(content_global_end, vol_end)
-
-                if overlap_start < overlap_end:
-                    fragments.append(
-                        FileSlice(
-                            volume_index=vol_idx,
-                            volume_offset=overlap_start - vol_start,
-                            volume_length=overlap_end - overlap_start,
-                            source_offset=overlap_start - content_global_start,
-                        )
-                    )
+            fragments = calculate_file_slices(
+                start_offset=track.start_offset,
+                file_size=content_size,
+                volume_size=self.volume_size,
+            )
 
             return FileGPS(
                 arc_path=arc_path, file_size=content_size, fragments=fragments
@@ -255,6 +238,7 @@ class Layout:
         Yields:
             TrackGPS: Track metadata along with its computed FileSlice fragments.
         """
+        from tartape.chunker import calculate_file_slices
 
         with self._session:
             query = Track.select().order_by(Track.start_offset).iterator()
@@ -264,28 +248,11 @@ class Layout:
                 fragments: list[FileSlice] = []
 
                 if content_size > 0 and track.start_offset is not None:
-                    content_global_start = track.start_offset + TAR_BLOCK_SIZE
-                    content_global_end = content_global_start + content_size
-
-                    first_vol = content_global_start // self.volume_size
-                    last_vol = (content_global_end - 1) // self.volume_size
-
-                    for vol_idx in range(first_vol, last_vol + 1):
-                        vol_start = vol_idx * self.volume_size
-                        vol_end = vol_start + self.volume_size
-
-                        overlap_start = max(content_global_start, vol_start)
-                        overlap_end = min(content_global_end, vol_end)
-
-                        if overlap_start < overlap_end:
-                            fragments.append(
-                                FileSlice(
-                                    volume_index=vol_idx,
-                                    volume_offset=overlap_start - vol_start,
-                                    volume_length=overlap_end - overlap_start,
-                                    source_offset=overlap_start - content_global_start,
-                                )
-                            )
+                    fragments = calculate_file_slices(
+                        start_offset=track.start_offset,
+                        file_size=content_size,
+                        volume_size=self.volume_size,
+                    )
 
                 yield TrackGPS(
                     arc_path=track.arc_path,
@@ -297,6 +264,7 @@ class Layout:
                     is_dir=track.is_dir,
                     is_symlink=track.is_symlink,
                     linkname=track.linkname or "",
+                    start_offset=track.start_offset or 0,
                     fragments=fragments,
                 )
 

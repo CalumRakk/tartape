@@ -249,7 +249,8 @@ class TrackGPS:
     is_dir: bool
     is_symlink: bool
     linkname: str
-    fragments: list[FileSlice]
+    start_offset: int = 0  # Global TAR byte offset where the entry starts
+    fragments: list[FileSlice] = field(default_factory=list)
 
     @property
     def md5sum(self) -> Optional[str]:
