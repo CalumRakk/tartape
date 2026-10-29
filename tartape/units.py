@@ -131,12 +131,9 @@ def format_size(size_bytes: int) -> str:
             if size_bytes % unit_val == 0:
                 return f"{size_bytes // unit_val}{unit_name}"
 
-            # Check for clean decimal up to 2 decimal places
+            # Format with up to 2 decimal places, stripping unnecessary trailing zeros
             ratio = size_bytes / unit_val
-            rounded_ratio = round(ratio, 2)
-            if round(rounded_ratio * unit_val) == size_bytes:
-                # Format without trailing zeros (e.g., 1.5 instead of 1.50)
-                formatted = f"{rounded_ratio:.2f}".rstrip("0").rstrip(".")
-                return f"{formatted}{unit_name}"
+            formatted = f"{ratio:.2f}".rstrip("0").rstrip(".")
+            return f"{formatted}{unit_name}"
 
     return f"{size_bytes}B"
